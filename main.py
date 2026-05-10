@@ -2956,6 +2956,7 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
+docx, pdf, yoki txt farmatda tayyorlab ber.
 ```
 
 ━━━━━━━━━━━━━━━
@@ -3020,37 +3021,46 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
 
 
     # ============================================================
-    #  OVOZLI QO'LLANMALAR
+    #  OVOZLI QO'LLANMALAR — Telegram file_id orqali tez yuborish
     # ============================================================
-    # Ovoz fayllarni project ichidagi voices/ papkaga joylang:
-    # voices/start_help.ogg
-    # voices/template_help.ogg
-    # voices/progress_help.ogg
-    def _voice_file_path(filename: str) -> str:
-        voice_dir = _os.environ.get("VOICE_DIR", "voices")
-        if _os.path.isabs(voice_dir):
-            return _os.path.join(voice_dir, filename)
-        return _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), voice_dir, filename)
+    # Endi voices/ papka kerak emas. Ovozlar Telegram file_id orqali yuboriladi.
+    # Xohlasangiz keyin Railway Variables orqali ham almashtirishingiz mumkin:
+    # START_VOICE_ID, TEMPLATE_VOICE_ID, PROGRESS_VOICE_ID
 
-    async def send_voice_guide(chat_id: int, voice_name: str):
-        """Ovozli qo'llanmani xavfsiz yuboradi. Fayl bo'lmasa bot to'xtab qolmaydi."""
-        path = _voice_file_path(voice_name)
-        if not _os.path.exists(path):
-            log.warning(f"Voice fayl topilmadi: {path}")
+    START_VOICE_ID = _os.environ.get(
+        "START_VOICE_ID",
+        "AwACAgIAAxkBAAFJSzVqAAH9eq1vbpaugGwyj-yQrc05O-wAAq2bAAL-6QhI-U1Iif8SAb47BA"
+    )
+
+    TEMPLATE_VOICE_ID = _os.environ.get(
+        "TEMPLATE_VOICE_ID",
+        "AwACAgIAAxkBAAFJSzdqAAH9-QertBIiLFrfyWEguq2rZIEAAqWbAAL-6QhIgp-I9DmIv7A7BA"
+    )
+
+    PROGRESS_VOICE_ID = _os.environ.get(
+        "PROGRESS_VOICE_ID",
+        "AwACAgIAAxkBAAFJSztqAAH-VjS_47ue_5azNrYCvdUWngEAAiqmAAI-EgABSDmBHLVTmfwmOwQ"
+    )
+
+    async def send_voice_by_id(chat_id: int, file_id: str):
+        """Ovozli qo'llanmani Telegram file_id orqali yuboradi.
+        Bu usul Railway serverdan fayl upload qilmaydi, shuning uchun ancha tez ishlaydi.
+        """
+        if not file_id:
             return
         try:
-            await bot_client.send_file(chat_id, path, voice_note=True)
+            await bot_client.send_file(chat_id, file_id, voice_note=True)
         except Exception as e:
-            log.warning(f"Voice yuborishda xato: {e}")
+            log.warning(f"Voice file_id orqali yuborishda xato: {e}")
 
     async def send_start_voice(chat_id: int):
-        await send_voice_guide(chat_id, "start_help.ogg")
+        await send_voice_by_id(chat_id, START_VOICE_ID)
 
     async def send_template_voice(chat_id: int):
-        await send_voice_guide(chat_id, "template_help.ogg")
+        await send_voice_by_id(chat_id, TEMPLATE_VOICE_ID)
 
     async def send_progress_voice(chat_id: int):
-        await send_voice_guide(chat_id, "progress_help.ogg")
+        await send_voice_by_id(chat_id, PROGRESS_VOICE_ID)
 
 
     def ai_settings_btns(state: UserState):
