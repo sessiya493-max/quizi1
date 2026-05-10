@@ -2956,7 +2956,7 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
-docx, pdf, yoki txt farmatda tayyorlab ber.
+docx, pdf yoki txt fayl qilib tayyorlab ber
 ```
 
 ━━━━━━━━━━━━━━━
@@ -3021,46 +3021,40 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
 
 
     # ============================================================
-    #  OVOZLI QO'LLANMALAR — Telegram file_id orqali tez yuborish
+    #  OVOZLI QO'LLANMALAR — Maxfiy kanal orqali tez yuborish
     # ============================================================
-    # Endi voices/ papka kerak emas. Ovozlar Telegram file_id orqali yuboriladi.
-    # Xohlasangiz keyin Railway Variables orqali ham almashtirishingiz mumkin:
-    # START_VOICE_ID, TEMPLATE_VOICE_ID, PROGRESS_VOICE_ID
+    # 1) Maxfiy kanalga 3 ta voice xabar tashlangan.
+    # 2) Bot kanalga admin qilingan bo'lishi kerak.
+    # 3) Bot shu kanaldagi tayyor voice xabarlarni forward qiladi.
+    # Bu usulda Railway serverdan voice upload qilinmaydi.
 
-    START_VOICE_ID = _os.environ.get(
-        "START_VOICE_ID",
-        "AwACAgIAAxkBAAFJSzVqAAH9eq1vbpaugGwyj-yQrc05O-wAAq2bAAL-6QhI-U1Iif8SAb47BA"
-    )
+    VOICE_CHANNEL_ID = int(_os.environ.get("VOICE_CHANNEL_ID", "-1003984400731"))
 
-    TEMPLATE_VOICE_ID = _os.environ.get(
-        "TEMPLATE_VOICE_ID",
-        "AwACAgIAAxkBAAFJSzdqAAH9-QertBIiLFrfyWEguq2rZIEAAqWbAAL-6QhIgp-I9DmIv7A7BA"
-    )
+    START_VOICE_MSG_ID = int(_os.environ.get("START_VOICE_MSG_ID", "2"))
+    TEMPLATE_VOICE_MSG_ID = int(_os.environ.get("TEMPLATE_VOICE_MSG_ID", "3"))
+    PROGRESS_VOICE_MSG_ID = int(_os.environ.get("PROGRESS_VOICE_MSG_ID", "4"))
 
-    PROGRESS_VOICE_ID = _os.environ.get(
-        "PROGRESS_VOICE_ID",
-        "AwACAgIAAxkBAAFJSztqAAH-VjS_47ue_5azNrYCvdUWngEAAiqmAAI-EgABSDmBHLVTmfwmOwQ"
-    )
-
-    async def send_voice_by_id(chat_id: int, file_id: str):
-        """Ovozli qo'llanmani Telegram file_id orqali yuboradi.
-        Bu usul Railway serverdan fayl upload qilmaydi, shuning uchun ancha tez ishlaydi.
-        """
-        if not file_id:
+    async def send_voice_from_channel(chat_id: int, msg_id: int):
+        """Maxfiy kanaldagi tayyor voice xabarni foydalanuvchiga forward qiladi."""
+        if not msg_id:
             return
         try:
-            await bot_client.send_file(chat_id, file_id, voice_note=True)
+            await bot_client.forward_messages(
+                entity=chat_id,
+                messages=msg_id,
+                from_peer=VOICE_CHANNEL_ID
+            )
         except Exception as e:
-            log.warning(f"Voice file_id orqali yuborishda xato: {e}")
+            log.warning(f"Voice kanal orqali yuborishda xato: {e}")
 
     async def send_start_voice(chat_id: int):
-        await send_voice_by_id(chat_id, START_VOICE_ID)
+        await send_voice_from_channel(chat_id, START_VOICE_MSG_ID)
 
     async def send_template_voice(chat_id: int):
-        await send_voice_by_id(chat_id, TEMPLATE_VOICE_ID)
+        await send_voice_from_channel(chat_id, TEMPLATE_VOICE_MSG_ID)
 
     async def send_progress_voice(chat_id: int):
-        await send_voice_by_id(chat_id, PROGRESS_VOICE_ID)
+        await send_voice_from_channel(chat_id, PROGRESS_VOICE_MSG_ID)
 
 
     def ai_settings_btns(state: UserState):
