@@ -2820,6 +2820,143 @@ async def main():
         except Exception as e:
             log.warning(f"Menu refresh xato: {e}")
 
+
+    # ============================================================
+    #  FAYL SHABLONI BO'YICHA QO'LLANMA MATNLARI
+    # ============================================================
+    def file_quiz_guide_text():
+        return """
+📂 **Fayldan quiz yaratish**
+
+Faylingiz botga to'g'ri tushishi uchun avval testlaringizni AI orqali bot shabloniga moslab oling.
+
+✅ **Nima qilish kerak?**
+1. Test faylingizni ChatGPT, Claude, Gemini yoki Groq AI ga yuboring.
+2. Pastdagi promptni ham birga yuboring.
+3. AI qaytargan natijani `.txt` yoki `.docx` fayl qilib saqlang.
+4. Shu faylni botga yuboring.
+
+━━━━━━━━━━━━━━━
+📋 **AI ga yuboriladigan tayyor prompt:**
+
+```
+Ushbu fayldagi BARCHA savollarni o'qib chiq.
+Savollarni aslo qisqartirma, o'zgartirma yoki tashlab ketma.
+
+Agar savollarda tayyor variantlar bo'lsa, ularni saqlab qol.
+Agar variantlar bo'lmasa, har bir savol uchun 4 ta mantiqiy variant yarat.
+
+Natijani FAQAT quyidagi shablonda qaytar:
+
+Savol matni
+=====
+Variant 1
+=====
+#To'g'ri javob
+=====
+Variant 3
+=====
+Variant 4
++++++
+
+MUHIM QOIDALAR:
+- Har bir savolda faqat 1 ta to'g'ri javob bo'lsin.
+- To'g'ri javob oldiga albatta # belgisi qo'yilsin.
+- Variantlar orasida ===== belgisi bo'lsin.
+- Har bir savol oxirida +++++ belgisi bo'lsin.
+- Hech qanday izoh, kirish so'zi yoki xulosa yozma.
+- Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
+- Savollar sonini kamaytirma.
+```
+
+━━━━━━━━━━━━━━━
+✅ **Bot qabul qiladigan oddiy namuna:**
+
+```
+O'zbekiston poytaxti qaysi shahar?
+=====
+Samarqand
+=====
+#Toshkent
+=====
+Buxoro
+=====
+Xiva
++++++
+```
+
+📌 **Narx:** Har 25 savolga 1 500 so'm
+_(50 savol = 3 000, 100 savol = 6 000)_
+
+Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
+"""
+
+    def bad_template_guide_text(reason=""):
+        reason_line = f"\n📌 Sabab: {reason}\n" if reason else ""
+        return (
+            "⚠️ **Fayl shablonga mos kelmadi**\n"
+            f"{reason_line}\n"
+            "Bot quiz yaratishi uchun fayl ichida savol, variantlar va to'g'ri javob `#` belgisi bilan aniq ko'rsatilgan bo'lishi kerak.\n\n"
+            "✅ **Nima qiling?**\n"
+            "1. Test faylingizni ChatGPT, Claude, Gemini yoki Groq AI ga yuboring.\n"
+            "2. Quyidagi promptni ham birga yuboring.\n"
+            "3. AI qaytargan matnni `.txt`, `.docx` yoki `.pdf` qilib botga qayta yuboring.\n\n"
+            "📋 **AI uchun tayyor prompt:**\n\n"
+            "```\n"
+            "Ushbu fayldagi BARCHA savollarni o'qib chiq.\n"
+            "Savollarni aslo qisqartirma, o'zgartirma yoki tashlab ketma.\n\n"
+            "Agar savollarda tayyor variantlar bo'lsa, ularni saqlab qol.\n"
+            "Agar variantlar bo'lmasa, har bir savol uchun 4 ta mantiqiy variant yarat.\n\n"
+            "Natijani FAQAT quyidagi shablonda qaytar:\n\n"
+            "Savol matni\n"
+            "=====\n"
+            "Variant 1\n"
+            "=====\n"
+            "#To'g'ri javob\n"
+            "=====\n"
+            "Variant 3\n"
+            "=====\n"
+            "Variant 4\n"
+            "+++++\n\n"
+            "MUHIM QOIDALAR:\n"
+            "- Har bir savolda faqat 1 ta to'g'ri javob bo'lsin.\n"
+            "- To'g'ri javob oldiga albatta # belgisi qo'yilsin.\n"
+            "- Variantlar orasida ===== belgisi bo'lsin.\n"
+            "- Har bir savol oxirida +++++ belgisi bo'lsin.\n"
+            "- Hech qanday izoh yozma.\n"
+            "- Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.\n"
+            "```"
+        )
+
+    # ============================================================
+    #  OVOZLI QO'LLANMALAR — maxfiy kanal orqali yuborish
+    # ============================================================
+    VOICE_CHANNEL_ID = int(_os.environ.get("VOICE_CHANNEL_ID", "-1003984400731"))
+    START_VOICE_MSG_ID = int(_os.environ.get("START_VOICE_MSG_ID", "2"))
+    TEMPLATE_VOICE_MSG_ID = int(_os.environ.get("TEMPLATE_VOICE_MSG_ID", "3"))
+    PROGRESS_VOICE_MSG_ID = int(_os.environ.get("PROGRESS_VOICE_MSG_ID", "4"))
+
+    async def send_voice_from_channel(chat_id: int, msg_id: int):
+        if not msg_id:
+            return
+        try:
+            await bot_client.forward_messages(
+                entity=chat_id,
+                messages=msg_id,
+                from_peer=VOICE_CHANNEL_ID
+            )
+        except Exception as e:
+            log.warning(f"Voice kanal orqali yuborishda xato: {e}")
+
+    async def send_start_voice(chat_id: int):
+        await send_voice_from_channel(chat_id, START_VOICE_MSG_ID)
+
+    async def send_template_voice(chat_id: int):
+        await send_voice_from_channel(chat_id, TEMPLATE_VOICE_MSG_ID)
+
+    async def send_progress_voice(chat_id: int):
+        await send_voice_from_channel(chat_id, PROGRESS_VOICE_MSG_ID)
+
     def ai_settings_btns(state: UserState):
         topic_show = state.topic if state.topic else "Barcha mavzu"
         return [
@@ -3051,6 +3188,7 @@ async def main():
             f"Boshlash uchun tugmani bosing 👇",
             buttons=main_menu(is_admin(uid), uid)
         )
+        await send_start_voice(uid)
 
 
     @bot_client.on(events.CallbackQuery(data=b"agree_terms"))
@@ -3104,6 +3242,7 @@ async def main():
             f"📁 Fayl yuklang yoki matn kiriting{bonus_msg}",
             buttons=main_menu(is_admin(uid), uid)
         )
+        await send_start_voice(uid)
 
     @bot_client.on(events.CallbackQuery(data=b"check_subscription"))
     async def on_check_subscription(event):
@@ -3132,6 +3271,7 @@ async def main():
                 f"📁 Fayl yuklang yoki matn kiriting.",
                 buttons=main_menu(is_admin(uid), uid)
             )
+            await send_start_voice(uid)
         else:
             await event.answer("Hali a'zo bo'lmagansiz yoki bot tekshira olmadi.", alert=True)
             await show_subscription_prompt(event, uid)
@@ -3228,6 +3368,21 @@ async def main():
                 pass
 
             log.info(f"Fayl: name={fname}, mime={mime}, user={uid}")
+
+            supported_docx = fname.endswith(".docx") or "officedocument.wordprocessingml" in mime
+            supported_pdf  = fname.endswith(".pdf") or "pdf" in mime
+            supported_txt  = fname.endswith(".txt") or mime.startswith("text/") or mime in ("application/octet-stream", "")
+
+            # Rasm/video/audio yoki boshqa fayllardan quiz tuzmaymiz.
+            if not (supported_docx or supported_pdf or supported_txt):
+                await msg.edit(
+                    bad_template_guide_text(
+                        "Bot faqat DOCX, PDF yoki TXT formatdagi matnli test faylini qabul qiladi. Rasm yuborilgan bo'lsa, avval rasm ichidagi savollarni AI/OCR orqali matnga aylantiring."
+                    ),
+                    buttons=[[Button.text("📂 Fayldan quiz yaratish")], [Button.text("🔙 Bosh menyu")]]
+                )
+                await send_template_voice(uid)
+                return
 
             content = ""
 
@@ -3339,33 +3494,20 @@ async def main():
                     await _show_file_price(event.chat_id, uid, q_count, price, bal, blocks)
 
             else:
-                # Shablon topilmadi — manual (bepul)
+                # Shablon topilmadi — foydalanuvchiga tushunarli qo'llanma va AI prompt beramiz.
                 lines = [l.strip() for l in content.splitlines() if l.strip()]
                 if not lines:
                     await msg.edit("❌ Faylda matn topilmadi!")
                     return
 
-                state = UserState(step="manual_start")
-                state.__dict__['raw_lines']     = lines
-                state.__dict__['manual_q_idx']  = 0
-                state.__dict__['manual_q_text'] = ""
-                state.__dict__['manual_opts']   = []
-                user_states[uid] = state
-                log.info(f"Manual rejim: {len(lines)} qator, user={uid}")
-
+                user_states.pop(uid, None)
+                reason = f"{len(lines)} ta qator topildi, lekin savol/variant/#to'g'ri javob formatini aniqlay olmadim."
                 await msg.edit(
-                    f"⚠️ **Shablon aniqlanmadi**\n\n"
-                    f"{len(lines)} ta qator topildi.\n"
-                    f"To'g'ri javoblarni siz belgilaysiz 👇\n"
-                    f"_(Bu rejim bepul)_"
+                    bad_template_guide_text(reason),
+                    buttons=[[Button.text("📂 Fayldan quiz yaratish")], [Button.text("🔙 Bosh menyu")]]
                 )
-                await event.respond(
-                    "Davom etamizmi?",
-                    buttons=[
-                        [Button.text("▶️ Davom etish")],
-                        [Button.text("🔙 Bosh menyu")],
-                    ]
-                )
+                await send_template_voice(uid)
+                return
 
         except Exception as e:
             log.error(f"on_file xato: {e}", exc_info=True)
@@ -3781,13 +3923,11 @@ async def main():
         if text == "📂 Fayldan quiz yaratish":
             user_states[uid] = UserState(step="wait_file")
             await event.respond(
-                "📂 **Fayldan quiz yaratish**\n\n"
-                "DOCX, PDF yoki TXT fayl yuboring\n\n"
-                "📌 **Narx:** Har 25 savolga 1 500 so'm\n"
-                "_(50 savol = 3 000, 100 savol = 6 000)_\n\n"
-                "❓ /yordam — fayl formati haqida",
+                file_quiz_guide_text(),
                 buttons=[[Button.text("🔙 Bosh menyu")]]
-            ); return
+            )
+            await send_template_voice(uid)
+            return
 
         if text == "✏️ Matn kiritish":
             user_states[uid] = UserState(step="wait_text")
