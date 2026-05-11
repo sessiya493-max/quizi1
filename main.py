@@ -2465,21 +2465,61 @@ def is_admin(uid): return uid in ADMIN_IDS
 # ============================================================
 #  QUIZ YARATISH (@QuizBot ga yuborish)
 # ============================================================
-async def send_poll(userbot, peer, q, opts, ans):
-    answers = [PollAnswer(
-        text=TextWithEntities(text=o[:100], entities=[]),
-        option=bytes([i])
-    ) for i, o in enumerate(opts)]
+def clean_answer_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").replace("\xa0", " ")).strip().lower()
+
+def get_correct_index(qdata: dict) -> int:
+    opts = qdata.get("opts") or []
+    correct_text = qdata.get("correct_text")
+
+    if correct_text:
+        target = clean_answer_text(correct_text)
+        for i, opt in enumerate(opts):
+            if clean_answer_text(opt) == target:
+                return i
+
+    try:
+        ans = int(qdata.get("ans", 0) or 0)
+    except Exception:
+        ans = 0
+
+    if 0 <= ans < len(opts):
+        return ans
+    return 0
+
+async def send_poll(userbot, peer, qdata):
+    question = str(qdata.get("q", ""))[:255]
+    opts = [str(o)[:100] for o in (qdata.get("opts") or [])]
+    correct_index = get_correct_index(qdata)
+
+    # MUHIM: option va correct_answers bir xil bytes bo'lishi shart.
+    # bytes([i]) o'rniga b"0", b"1", b"2" ishlatamiz — @QuizBot uchun barqaror ishlaydi.
+    answers = [
+        PollAnswer(
+            text=TextWithEntities(text=o, entities=[]),
+            option=str(i).encode()
+        )
+        for i, o in enumerate(opts)
+    ]
+
     poll = Poll(
         id=random.randint(1, 2**31),
-        question=TextWithEntities(text=q[:255], entities=[]),
-        answers=answers, quiz=True,
-        public_voters=False, multiple_choice=False, closed=False,
+        question=TextWithEntities(text=question, entities=[]),
+        answers=answers,
+        quiz=True,
+        public_voters=False,
+        multiple_choice=False,
+        closed=False,
     )
+
     await userbot(SendMediaRequest(
         peer=peer,
-        media=InputMediaPoll(poll=poll, correct_answers=[bytes([ans])]),
-        message="", random_id=random.randint(1, 2**63),
+        media=InputMediaPoll(
+            poll=poll,
+            correct_answers=[str(correct_index).encode()]
+        ),
+        message="",
+        random_id=random.randint(1, 2**63),
     ))
 
 async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
@@ -2512,7 +2552,7 @@ async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
                     await userbot.send_message(qbot, AD_TEXT)
                     await asyncio.sleep(2)
 
-                await send_poll(userbot, qbot, q["q"], q["opts"], stable_answer_index(q))
+                await send_poll(userbot, qbot, q)
                 log.info(f"  [{i+1}/{len(req.questions)}] OK")
                 await asyncio.sleep(2)
             except Exception as e:
@@ -2538,17 +2578,25 @@ async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
                 await msg.click(text=msg.reply_markup.rows[0].buttons[0].text)
         await asyncio.sleep(4)
 
-        # Tartib — eng yangi tugmali xabarni topamiz
+        # Tartib — doim ketma-ket tanlanadi.
+        # Sabab: @QuizBot aralashtirish javob indeksini chalkashtirib yuborishi mumkin.
         msgs = await userbot.get_messages(qbot, limit=5)
         msg = next((m for m in msgs if m.reply_markup), None)
         if msg:
             clicked = False
+            preferred_words = ("ketma", "ketma-ket", "in order", "ordered", "don't shuffle", "do not shuffle", "no shuffle")
+            bad_words = ("aralash", "shuffle", "random")
             for row in msg.reply_markup.rows:
                 for btn in row.buttons:
-                    if req.order_choice.lower() in btn.text.lower():
-                        await msg.click(text=btn.text); clicked = True; break
-                if clicked: break
+                    btxt = (btn.text or "").lower()
+                    if any(w in btxt for w in preferred_words) and not any(w in btxt for w in bad_words):
+                        await msg.click(text=btn.text)
+                        clicked = True
+                        break
+                if clicked:
+                    break
             if not clicked:
+                # Agar aniq topilmasa, birinchi tugma odatda default/ketma-ket bo'ladi.
                 await msg.click(text=msg.reply_markup.rows[0].buttons[0].text)
         await asyncio.sleep(6)
 
@@ -5247,7 +5295,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                         i += 1
 
                 if q_text and len(options) >= 2:
-                    qs.append({"q": q_text, "opts": options, "ans": correct})
+                    qs.append({"q": q_text, "opts": options, "ans": correct, "correct_text": options[correct] if 0 <= correct < len(options) else options[0]})
             else:
                 i += 1
 
