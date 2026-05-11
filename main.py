@@ -2631,6 +2631,56 @@ async def log_action(uid: int, username: str, full_name: str, action: str):
         log.error(f"Log yuborishda xato: {e}")
 
 
+
+# ============================================================
+#  USER XABARLARINI TOZALASH VA PROGRESS
+# ============================================================
+async def safe_delete_messages(chat_id: int, msg_ids: list):
+    """Keraksiz xabarlarni jim o'chirish."""
+    for mid in list(dict.fromkeys([m for m in msg_ids if m])):
+        try:
+            await bot_client.delete_messages(chat_id, mid)
+        except Exception as e:
+            log.debug(f"Xabar o'chmadi {mid}: {e}")
+
+
+def remember_cleanup(uid: int, *msg_ids):
+    """UserState ichida keyin o'chiriladigan xabar ID larni saqlash."""
+    st = user_states.get(uid)
+    if not st:
+        return
+    ids = st.__dict__.setdefault("cleanup_msg_ids", [])
+    for mid in msg_ids:
+        if mid and mid not in ids:
+            ids.append(mid)
+    user_states[uid] = st
+
+
+async def cleanup_user_flow_messages(uid: int, chat_id: int):
+    """Preview / narx / oraliq xabarlarni o'chirish."""
+    st = user_states.get(uid)
+    ids = []
+    if st:
+        ids = st.__dict__.get("cleanup_msg_ids", []) or []
+        st.__dict__["cleanup_msg_ids"] = []
+        user_states[uid] = st
+    if ids:
+        await safe_delete_messages(chat_id, ids)
+
+
+def progress_text(percent: int, done: int, total: int, remain_seconds: int) -> str:
+    filled = max(0, min(10, round(percent / 10)))
+    bar = "🟦" * filled + "⬜" * (10 - filled)
+    return (
+        "🚀 **Quiz yaratilmoqda...**\n\n"
+        f"📊 Jarayon: **{percent}%**\n"
+        f"{bar}\n\n"
+        f"✅ Tayyorlangan: **{done} ta**\n"
+        f"⏳ Qolgan: **{max(total - done, 0)} ta**\n"
+        f"🕐 Taxminiy qolgan vaqt: **~{format_wait(max(remain_seconds, 0))}**\n\n"
+        "💡 Botdan chiqib ketmang. Tayyor bo'lgach quiz link avtomatik yuboriladi."
+    )
+
 # ============================================================
 #  NAVBAT ISHLOVCHISI
 # ============================================================
@@ -2650,21 +2700,60 @@ async def queue_worker():
 
 async def run_request(userbot, req: QuizRequest):
     import time
-    phone = account_phones.get(id(userbot), "?")
     started = time.time()
+    progress_msg = None
+    progress_task = None
+
+    async def progress_loop():
+        last_text = ""
+        total = max(len(req.questions), 1)
+        est = max(estimate_seconds(total), 20)
+        while True:
+            elapsed = int(time.time() - started)
+            # 95% gacha ko'rsatamiz, 100% faqat link tayyor bo'lganda chiqadi
+            percent = min(95, max(5, int((elapsed / est) * 100)))
+            done = min(total, max(0, int(total * percent / 100)))
+            remain = max(est - elapsed, 1)
+            txt = progress_text(percent, done, total, remain)
+            try:
+                nonlocal progress_msg
+                if progress_msg is None:
+                    progress_msg = await bot_client.send_message(req.chat_id, txt)
+                elif txt != last_text:
+                    await progress_msg.edit(txt)
+                last_text = txt
+            except Exception as e:
+                if "message was not modified" not in str(e).lower():
+                    log.warning(f"Progress edit xato: {e}")
+            await asyncio.sleep(4)
+
     try:
-        await bot_client.send_message(
-            req.chat_id,
-            f"⏳ **Yaratilmoqda...**\n📚 {req.fan_name} V{req.variant_num}\n"
-            f"❓ {len(req.questions)} savol | 📱 `{phone}`\n"
-            f"🕐 ~{format_wait(estimate_seconds(len(req.questions)))}"
-        )
+        progress_task = asyncio.create_task(progress_loop())
+        try:
+            await send_progress_voice(req.user_id)
+        except Exception:
+            pass
+
         url = await make_quiz(userbot, req)
         elapsed = int(time.time() - started)
         tl = {"15": "15s", "30": "30s", "60": "60s", "0": "Chegarasiz"}
 
+        if progress_task:
+            progress_task.cancel()
+            try:
+                await progress_task
+            except asyncio.CancelledError:
+                pass
+
+        if progress_msg:
+            try:
+                await progress_msg.edit(progress_text(100, len(req.questions), len(req.questions), 0))
+                await asyncio.sleep(1)
+                await progress_msg.delete()
+            except Exception:
+                pass
+
         if url:
-            # DB ga quiz saqlash
             db_save_quiz(
                 user_id    = req.user_id,
                 fan_name   = req.fan_name,
@@ -2675,13 +2764,14 @@ async def run_request(userbot, req: QuizRequest):
                 order_type = req.order_choice,
                 source     = getattr(req, 'source', 'file'),
             )
-            # Admin ga xabar
             src = "🤖 AI" if getattr(req, 'source', 'file') == 'ai' else "📂 Fayl"
+            phone = account_phones.get(id(userbot), "?")
             await notify_admin(
                 f"✅ **Quiz yaratildi**\n\n"
                 f"👤 user: `{req.user_id}`\n"
                 f"{src} | 📚 {req.fan_name} V{req.variant_num}\n"
                 f"❓ {len(req.questions)} savol | 🕐 {format_wait(elapsed)}\n"
+                f"📱 Akkaunt: `{phone}`\n"
                 f"🔗 {url}"
             )
             await bot_client.send_message(
@@ -2695,7 +2785,6 @@ async def run_request(userbot, req: QuizRequest):
                 f"🔗 {url}"
             )
         else:
-            # Havola topilmadi — pulni qaytaramiz
             refund = calc_file_price(len(req.questions))
             db_add_balance(req.user_id, refund, f"Qaytarildi: quiz V{req.variant_num} xato")
             bal_left = db_get_balance(req.user_id)
@@ -2707,7 +2796,13 @@ async def run_request(userbot, req: QuizRequest):
                 f"Qayta urinib ko'ring:"
             )
     except Exception as e:
-        # Xato — pulni qaytaramiz
+        if progress_task:
+            progress_task.cancel()
+        try:
+            if progress_msg:
+                await progress_msg.delete()
+        except Exception:
+            pass
         try:
             refund = calc_file_price(len(req.questions))
             db_add_balance(req.user_id, refund, f"Qaytarildi: xato — {str(e)[:50]}")
@@ -4115,6 +4210,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         # ---- FILE CONFIRMED — namuna ko'rib bo'lgach ----
         if state.step == "file_confirmed":
             if text == "✅ Maqul, davom etamiz":
+                await cleanup_user_flow_messages(uid, event.chat_id)
                 q_count = state.total_questions
                 price   = state.__dict__.get("_price", calc_file_price(q_count))
                 blocks  = (q_count + 24) // 25
@@ -4152,6 +4248,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 return
 
             if text == "❌ Bekor qilish":
+                await cleanup_user_flow_messages(uid, event.chat_id)
                 user_states[uid] = UserState()
                 # Admin username/linkni olish
                 bot_me_info = await bot_client.get_me()
