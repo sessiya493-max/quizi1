@@ -3065,7 +3065,6 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
-docx,pdf yoki txt fayl qilib ber
 ```
 
 ━━━━━━━━━━━━━━━
@@ -4043,7 +4042,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                     "📋 **Mening quizlarim**\n\n"
                     "Hali quiz yaratmagansiz.\n\n"
                     "🤖 AI yoki 📂 fayl orqali quiz tuzing!",
-                    buttons=main_menu(adm)
+                    buttons=main_menu(adm, uid)
                 )
                 return
 
@@ -4100,7 +4099,31 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         # ---- HAMKOR BO'LISH ----
         if text == "🤝 Hamkor bo'lish":
             if db_is_partner(uid):
-                await event.respond("✅ Siz allaqachon hamkorsiz!", buttons=main_menu(adm, uid))
+                # Eski klaviaturada "Hamkor bo'lish" qolib ketgan bo'lsa ham,
+                # uni bosganda bevosita Hamkor panelini ochamiz va menyuni yangilaymiz.
+                pinfo = db_get_partner_info(uid)
+                if pinfo:
+                    _, pbal, total_earned, total_refs = pinfo
+                else:
+                    pbal, total_earned, total_refs = 0, 0, 0
+                bot_me2 = await bot_client.get_me()
+                plink = f"https://t.me/{bot_me2.username}?start=ref_{uid}"
+                await event.respond(
+                    f"🤝 **HAMKOR PANELI**\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"💰 **Hamkor balansi:** {pbal:,} so'm\n"
+                    f"📈 **Jami daromad:** {total_earned:,} so'm\n"
+                    f"👥 **Taklif qilganlar:** {total_refs} ta\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"🔗 **Hamkorlik havolangiz:**\n`{plink}`\n\n"
+                    f"Quyidagi bo'limlardan birini tanlang 👇",
+                    buttons=[
+                        [Button.text("💰 Hamkor balans"), Button.text("🔗 Hamkorlik referali")],
+                        [Button.text("🔙 Bosh menyu")],
+                    ]
+                )
+                # Asosiy klaviaturani ham "Hamkor paneli" holatiga yangilab yuboramiz
+                await event.respond("✅ Menyu yangilandi", buttons=main_menu(adm, uid))
                 return
             await event.respond(
                 "🤝 **HAMKORLIK DASTURI**\n\n"
@@ -4510,7 +4533,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                     log.error(f"AI xato: {e}")
                     await event.respond(
                         f"❌ AI xato: {e}\n\nGROQ_API_KEY ni tekshiring!",
-                        buttons=main_menu(adm)
+                        buttons=main_menu(adm, uid)
                     )
                 return
 
@@ -4699,7 +4722,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 "✅ **Quiz yaratish boshlandi**\n\n"
                 "Iltimos, kutib turing. Quiz tayyorlanish jarayoni foiz bilan ko‘rsatib boriladi.\n"
                 "Tayyor bo‘lgach, havola avtomatik yuboriladi.",
-                buttons=main_menu(adm)
+                buttons=main_menu(adm, uid)
             )
             await send_progress_voice(uid)
             # Bu xabar progress oynasi chiqqandan keyin chatda keraksiz qolmasin
