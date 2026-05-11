@@ -3065,6 +3065,7 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
+docx yoki txt farmatda tayyorlab ber
 ```
 
 ━━━━━━━━━━━━━━━
@@ -3237,7 +3238,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             await bot_client.send_message(
                 target_uid,
                 f"🎉 **Tabriklaymiz! Hamkorlik arizangiz tasdiqlandi!**\n\n"
-                f"Endi asosiy menyuda **🤝 Hamkor paneli** tugmasi chiqadi.\n\n"
+                f"✅ Menyu yangilandi. Endi pastdagi asosiy menyuda **🤝 Hamkor paneli** tugmasi chiqadi.\n\n"
                 f"🔗 Sizning shaxsiy havolangiz:\n`{plink}`\n\n"
                 f"💰 Har yangi foydalanuvchi uchun: **+{PARTNER_JOIN_BONUS:,} so'm**\n"
                 f"💳 To'lovlardan ulush: **{PARTNER_PAY_PERCENT}%**",
@@ -3389,7 +3390,8 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 f"📢 Bu havolani kanal, guruh va ijtimoiy tarmoqlarda ulashing!\n\n"
                 f"💰 Har jalb: +{PARTNER_JOIN_BONUS} so'm\n"
                 f"💳 Har to'lovdan: {PARTNER_PAY_PERCENT}%\n\n"
-                f"Hamkor panelini ochish uchun pastdagi tugmani bosing 👇"
+                f"✅ Pastdagi menyu yangilandi. Endi **🤝 Hamkor paneli** tugmasi chiqadi 👇",
+                buttons=main_menu(is_admin(target_uid), target_uid)
             )
         except Exception as e:
             await event.respond(f"⚠️ Foydalanuvchiga xabar yuborilmadi: {e}")
@@ -4099,8 +4101,11 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         # ---- HAMKOR BO'LISH ----
         if text == "🤝 Hamkor bo'lish":
             if db_is_partner(uid):
-                # Eski klaviaturada "Hamkor bo'lish" qolib ketgan bo'lsa ham,
-                # uni bosganda bevosita Hamkor panelini ochamiz va menyuni yangilaymiz.
+                # Foydalanuvchi allaqachon hamkor bo'lsa, eski keyboardni majburan yangilaymiz.
+                await event.respond(
+                    "✅ Siz allaqachon hamkorsiz!\n\nMenyu yangilandi — pastda **🤝 Hamkor paneli** tugmasi chiqadi 👇",
+                    buttons=main_menu(adm, uid)
+                )
                 pinfo = db_get_partner_info(uid)
                 if pinfo:
                     _, pbal, total_earned, total_refs = pinfo
@@ -4122,8 +4127,6 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                         [Button.text("🔙 Bosh menyu")],
                     ]
                 )
-                # Asosiy klaviaturani ham "Hamkor paneli" holatiga yangilab yuboramiz
-                await event.respond("✅ Menyu yangilandi", buttons=main_menu(adm, uid))
                 return
             await event.respond(
                 "🤝 **HAMKORLIK DASTURI**\n\n"
