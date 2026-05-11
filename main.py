@@ -3654,8 +3654,9 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 )
 
                 preview_count = min(5, q_count)
-                # MUHIM: random ishlatmaymiz. @QuizBot javoblarni almashtirib yubormasligi uchun ketma-ket yuboramiz.
-                preview_qs = qs[:preview_count]
+                # Namuna uchun savollar random tanlanadi, LEKIN quiz ichidagi tartib va variantlar aralashtirilmaydi.
+                # @QuizBot aralash rejimda to'g'ri javobni chalkashtirishi mumkin, shuning uchun order_choice doim "order".
+                preview_qs = random.sample(qs, preview_count) if q_count > preview_count else list(qs)
 
                 # Preview quizni yuboramiz (bepul, haqiqiy akkaunt bilan)
                 try:
@@ -4465,13 +4466,39 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             return
 
         # ---- TARTIB ----
-        # Eski state qolib ketgan foydalanuvchilar uchun fallback.
-        # Aralash qabul qilinmaydi, baribir ketma-ket davom etadi.
+        # Aralash rejimi butunlay o'chirilgan. Eski state qolib ketsa ham quiz avtomatik ketma-ket davom etadi.
         if state.step == "ask_order":
             state.order_choice = "order"
-            state.step = "ask_time"
+            if not getattr(state, "time_choice", None):
+                state.step = "ask_time"
+                user_states[uid] = state
+                await event.respond("⏱ Vaqtni tanlang:", buttons=time_btns())
+                return
+
+            total, pv = state.total_questions, state.per_variant
+            nv = (total + pv - 1) // pv
+            state.step = "idle"
             user_states[uid] = state
-            await event.respond("✅ Tartib avtomatik: Ketma-ket. Iltimos, vaqtni tanlang:", buttons=time_btns())
+            qs = state.questions
+            remember_cleanup(uid, getattr(event, 'id', None))
+            await cleanup_user_flow_messages(uid, event.chat_id)
+            first_part_count = len(qs[0:min(pv, total)]) if qs else total
+            initial_progress = await event.respond(
+                progress_text(5, 0, max(first_part_count, 1), estimate_seconds(max(first_part_count, 1))),
+                buttons=main_menu(adm, uid)
+            )
+            async with queue_lock:
+                for v in range(nv):
+                    part = qs[v*pv:min((v+1)*pv, total)]
+                    request_queue.append(QuizRequest(
+                        user_id=uid, chat_id=event.chat_id,
+                        questions=part,
+                        fan_name=state.fan_name, variant_num=v+1,
+                        time_choice=state.time_choice,
+                        order_choice="order", total_variants=nv,
+                        source=getattr(state, 'source', 'file'),
+                        progress_msg_id=getattr(initial_progress, 'id', None) if v == 0 else None,
+                    ))
             return
 
     # ============================================================
@@ -5942,29 +5969,47 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
     async def _send_preview(userbot, req: QuizRequest, uid: int, chat_id: int,
                             q_count: int, price: int, bal: int, blocks: int, progress_msg=None):
         try:
-            # Preview jarayonida foydalanuvchi kutib qolmasligi uchun bitta xabarni foiz bilan yangilaymiz.
+            # Namuna tayyorlanayotgan paytda foydalanuvchi kutib qolmasligi uchun bitta xabar edit bo'ladi.
             if progress_msg:
-                try:
-                    await progress_msg.edit(
-                        f"🧠 **Namuna quiz tayyorlanmoqda...**\n\n"
-                        f"▰▰▰▰▰▰▱▱▱▱ 60%\n"
-                        f"Savollar ketma-ket tartibda yuborilmoqda."
-                    )
-                except Exception:
-                    pass
+                for pct, title in [
+                    (55, "🧠 Namuna quiz tayyorlanmoqda..."),
+                    (70, "📤 Savollar @QuizBot ga yuborilmoqda..."),
+                    (85, "🔗 Havola olinmoqda...")
+                ]:
+                    try:
+                        filled = max(1, min(10, round(pct / 10)))
+                        bar = "🟦" * filled + "⬜" * (10 - filled)
+                        await progress_msg.edit(
+                            f"{title}\n\n"
+                            f"📊 Jarayon: **{pct}%**\n"
+                            f"{bar}\n\n"
+                            f"💡 Botdan chiqib ketmang. Namuna tayyor bo'lgach havola yuboriladi."
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.5)
 
             url = await make_quiz(userbot, req)
             if url:
-                await bot_client.send_message(
-                    chat_id,
-                    f"\u2705 **Namuna tayyor!**\n\n"
-                    f"\u25b6\ufe0f Quizni sinab ko'ring: {url}\n\n"
-                    f"Maqul bo'lsa \u2014 to'lov qilib, butun to'plamni oling \U0001F447",
-                    buttons=[
-                        [Button.text("✅ Maqul, davom etamiz")],
-                        [Button.text("❌ Bekor qilish")],
-                    ]
+                final_text = (
+                    f"✅ **Namuna tayyor!**\n\n"
+                    f"📊 Jarayon: **100%**\n"
+                    f"🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦\n\n"
+                    f"▶️ Quizni sinab ko'ring: {url}\n\n"
+                    f"Maqul bo'lsa — to'lov qilib, butun to'plamni oling 👇"
                 )
+                btns = [
+                    [Button.text("✅ Maqul, davom etamiz")],
+                    [Button.text("❌ Bekor qilish")],
+                ]
+                if progress_msg:
+                    try:
+                        await progress_msg.edit(final_text, buttons=btns)
+                    except Exception:
+                        await bot_client.send_message(chat_id, final_text, buttons=btns)
+                else:
+                    await bot_client.send_message(chat_id, final_text, buttons=btns)
+
                 state = user_states.get(uid)
                 if state:
                     state.step = "file_confirmed"
