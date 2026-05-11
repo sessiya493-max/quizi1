@@ -2578,26 +2578,56 @@ async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
                 await msg.click(text=msg.reply_markup.rows[0].buttons[0].text)
         await asyncio.sleep(4)
 
-        # Tartib — doim ketma-ket tanlanadi.
-        # Sabab: @QuizBot aralashtirish javob indeksini chalkashtirib yuborishi mumkin.
-        msgs = await userbot.get_messages(qbot, limit=5)
+        # Tartib — DOIM KETMA-KET.
+        # MUHIM: @QuizBot aralash/random tartibda ba'zan to'g'ri javoblarni chalkashtirib yuboradi.
+        # Shu sabab bu joyda random/shuffle/aralash tugmasini hech qachon bosmaymiz.
+        msgs = await userbot.get_messages(qbot, limit=8)
         msg = next((m for m in msgs if m.reply_markup), None)
         if msg:
-            clicked = False
-            preferred_words = ("ketma", "ketma-ket", "in order", "ordered", "don't shuffle", "do not shuffle", "no shuffle")
-            bad_words = ("aralash", "shuffle", "random")
+            preferred_words = (
+                "ketma", "ketma-ket", "tartib",
+                "in order", "ordered", "sequential", "sequence", "normal order",
+                "don't shuffle", "do not shuffle", "no shuffle", "without shuffle",
+                "по поряд", "поряд", "послед", "без перем", "не перем",
+            )
+            bad_words = (
+                "aralash", "random", "shuffle", "mix", "mixed",
+                "перемеш", "случайн", "рандом",
+            )
+
+            all_buttons = []
             for row in msg.reply_markup.rows:
                 for btn in row.buttons:
-                    btxt = (btn.text or "").lower()
-                    if any(w in btxt for w in preferred_words) and not any(w in btxt for w in bad_words):
-                        await msg.click(text=btn.text)
-                        clicked = True
-                        break
-                if clicked:
+                    btxt = (btn.text or "").strip()
+                    all_buttons.append((btn, btxt, btxt.lower()))
+
+            chosen_text = None
+
+            # 1) Aniq ketma-ket tugmani qidiramiz
+            for btn, btxt, low in all_buttons:
+                if any(w in low for w in preferred_words) and not any(w in low for w in bad_words):
+                    chosen_text = btxt
                     break
-            if not clicked:
-                # Agar aniq topilmasa, birinchi tugma odatda default/ketma-ket bo'ladi.
-                await msg.click(text=msg.reply_markup.rows[0].buttons[0].text)
+
+            # 2) Agar 2 ta tugma bo'lsa va bittasi random/aralash bo'lsa, ikkinchisini tanlaymiz
+            if not chosen_text and len(all_buttons) == 2:
+                safe = [(btn, btxt, low) for btn, btxt, low in all_buttons if not any(w in low for w in bad_words)]
+                if len(safe) == 1:
+                    chosen_text = safe[0][1]
+
+            # 3) Hech bo'lmasa random/aralash bo'lmagan birinchi tugmani bosamiz
+            if not chosen_text:
+                for btn, btxt, low in all_buttons:
+                    if not any(w in low for w in bad_words):
+                        chosen_text = btxt
+                        break
+
+            if chosen_text:
+                await msg.click(text=chosen_text)
+                log.info(f"Quiz tartibi tanlandi: {chosen_text}")
+            else:
+                # Xavfsizlik uchun random tugmasini bosmaymiz. Agar tanlay olmasak, /done dan keyin default qoladi.
+                log.warning("Quiz tartibi tugmasi topilmadi yoki faqat random tugmalar chiqdi; bosilmadi")
         await asyncio.sleep(6)
 
         # Havola olish — faqat yangi xabarlardan (start_msg_id dan keyin)
@@ -3642,15 +3672,18 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 # ── Preview jarayoni: foydalanuvchi kutib qolmasligi uchun foizli progress ──
                 await msg.edit(
                     f"📂 **Fayl tekshirilmoqda...**\n\n"
-                    f"▰▰▱▱▱▱▱▱▱▱ 20%\n"
-                    f"Topildi: **{q_count} ta savol**"
+                    f"📊 Jarayon: **15%**\n"
+                    f"🟦🟦⬜⬜⬜⬜⬜⬜⬜⬜\n\n"
+                    f"💡 Botdan chiqib ketmang. Savollar tekshirilmoqda."
                 )
 
                 await asyncio.sleep(0.4)
                 await msg.edit(
                     f"📄 **Savollar ajratilmoqda...**\n\n"
-                    f"▰▰▰▰▱▱▱▱▱▱ 40%\n"
-                    f"Namuna quiz tayyorlanadi."
+                    f"📊 Jarayon: **35%**\n"
+                    f"🟦🟦🟦🟦⬜⬜⬜⬜⬜⬜\n\n"
+                    f"✅ Topildi: **{q_count} ta savol**\n"
+                    f"🧠 Namuna quiz ketma-ket tartibda tayyorlanadi."
                 )
 
                 preview_count = min(5, q_count)
