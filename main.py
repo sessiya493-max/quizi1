@@ -2860,7 +2860,7 @@ async def run_request(userbot, req: QuizRequest):
                 f"📚 {req.fan_name} — Variant {req.variant_num}\n"
                 f"❓ {len(req.questions)} savol\n"
                 f"⏱ {tl.get(req.time_choice, req.time_choice)} | "
-                f"🔀 {'Aralash' if req.order_choice=='shuffle' else 'Ketma-ket'}\n"
+                f"📋 Ketma-ket\n"
                 f"🕐 {format_wait(elapsed)}\n\n"
                 f"🔗 {url}"
             )
@@ -3045,7 +3045,6 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
-docx yoki txt fayl yaratib ber
 ```
 
 ━━━━━━━━━━━━━━━
@@ -3157,7 +3156,8 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         ]
 
     def order_btns():
-        return [[Button.text("📋 Ketma-ket"), Button.text("🔀 Aralash")]]
+        # Aralash butunlay o'chirildi: @QuizBot javoblarni chalkashtirmasligi uchun doim ketma-ket.
+        return [[Button.text("📋 Ketma-ket")]]
 
     def variant_btns(total):
         rows, row = [], []
@@ -3639,14 +3639,23 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 user_states[uid] = state
                 log.info(f"State saqlandi: step=file_preview, {q_count} savol, user={uid}")
 
-                # ── 5 ta random savol QuizBot ga yuborib preview ko'rsatish ──
+                # ── Preview jarayoni: foydalanuvchi kutib qolmasligi uchun foizli progress ──
                 await msg.edit(
-                    f"📂 **{q_count} ta savol topildi!**\n\n"
-                    f"⏳ Namuna sifatida 5 ta savol quiz qilinmoqda..."
+                    f"📂 **Fayl tekshirilmoqda...**\n\n"
+                    f"▰▰▱▱▱▱▱▱▱▱ 20%\n"
+                    f"Topildi: **{q_count} ta savol**"
+                )
+
+                await asyncio.sleep(0.4)
+                await msg.edit(
+                    f"📄 **Savollar ajratilmoqda...**\n\n"
+                    f"▰▰▰▰▱▱▱▱▱▱ 40%\n"
+                    f"Namuna quiz tayyorlanadi."
                 )
 
                 preview_count = min(5, q_count)
-                preview_qs = random.sample(qs, preview_count)
+                # MUHIM: random ishlatmaymiz. @QuizBot javoblarni almashtirib yubormasligi uchun ketma-ket yuboramiz.
+                preview_qs = qs[:preview_count]
 
                 # Preview quizni yuboramiz (bepul, haqiqiy akkaunt bilan)
                 try:
@@ -3664,7 +3673,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                         )
                         # Preview ni fon task sifatida yuboramiz
                         asyncio.create_task(_send_preview(userbot, preview_req, uid, event.chat_id,
-                                                          q_count, price, bal, blocks))
+                                                          q_count, price, bal, blocks, msg))
                     else:
                         # Akkaunt yo'q — to'g'ridan narx ko'rsatamiz
                         await _show_file_price(event.chat_id, uid, q_count, price, bal, blocks)
@@ -4411,20 +4420,13 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             tm = {"⏱ 15s": "15", "⏱ 30s": "30", "⏱ 60s": "60", "⏱ Chegarasiz": "0"}
             if text not in tm:
                 await event.respond("Tugmadan tanlang!", buttons=time_btns()); return
-            state.time_choice = tm[text]
-            state.step = "ask_order"
-            user_states[uid] = state
-            m = await event.respond("🔀 Tartib:", buttons=order_btns())
-            remember_cleanup(uid, getattr(event, 'id', None), getattr(m, 'id', None))
-            return
 
-        # ---- TARTIB ----
-        if state.step == "ask_order":
-            if text in ("📋 Ketma-ket", "🔀 Aralash"):
-                # To'g'ri javoblar har safar o'zgarib ketmasligi uchun QuizBotda ketma-ket tartib ishlatiladi.
-                state.order_choice = "order"
-            else:
-                await event.respond("Tugmadan tanlang!", buttons=order_btns()); return
+            state.time_choice = tm[text]
+
+            # MUHIM: tartib tanlash bosqichi olib tashlandi.
+            # @QuizBot aralashtirishda to'g'ri javob indeksini chalkashtirishi mumkin,
+            # shuning uchun har doim KETMA-KET tartibda quiz yaratiladi.
+            state.order_choice = "order"
 
             total, pv = state.total_questions, state.per_variant
             nv = (total + pv - 1) // pv
@@ -4451,7 +4453,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                         questions=part,
                         fan_name=state.fan_name, variant_num=v+1,
                         time_choice=state.time_choice,
-                        order_choice=state.order_choice, total_variants=nv,
+                        order_choice="order", total_variants=nv,
                         source=getattr(state, 'source', 'file'),
                         progress_msg_id=getattr(initial_progress, 'id', None) if v == 0 else None,
                     )
@@ -4460,6 +4462,16 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             async with queue_lock:
                 for req in new_reqs:
                     request_queue.append(req)
+            return
+
+        # ---- TARTIB ----
+        # Eski state qolib ketgan foydalanuvchilar uchun fallback.
+        # Aralash qabul qilinmaydi, baribir ketma-ket davom etadi.
+        if state.step == "ask_order":
+            state.order_choice = "order"
+            state.step = "ask_time"
+            user_states[uid] = state
+            await event.respond("✅ Tartib avtomatik: Ketma-ket. Iltimos, vaqtni tanlang:", buttons=time_btns())
             return
 
     # ============================================================
@@ -5889,7 +5901,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
 
 
     # ============================================================
-    #  FAYL PREVIEW — 5 ta random savol yuborish
+    #  FAYL PREVIEW — 5 ta savolni ketma-ket yuborish
     # ============================================================
     async def _show_file_price(chat_id: int, uid: int, q_count: int,
                                price: int, bal: int, blocks: int):
@@ -5928,13 +5940,19 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             )
 
     async def _send_preview(userbot, req: QuizRequest, uid: int, chat_id: int,
-                            q_count: int, price: int, bal: int, blocks: int):
+                            q_count: int, price: int, bal: int, blocks: int, progress_msg=None):
         try:
-            await bot_client.send_message(
-                chat_id,
-                f"\U0001F50D **Namuna (5 ta random savol)**\n"
-                f"Savollaringiz to'g'ri o'qildimi? Ko'rib chiqing \U0001F447"
-            )
+            # Preview jarayonida foydalanuvchi kutib qolmasligi uchun bitta xabarni foiz bilan yangilaymiz.
+            if progress_msg:
+                try:
+                    await progress_msg.edit(
+                        f"🧠 **Namuna quiz tayyorlanmoqda...**\n\n"
+                        f"▰▰▰▰▰▰▱▱▱▱ 60%\n"
+                        f"Savollar ketma-ket tartibda yuborilmoqda."
+                    )
+                except Exception:
+                    pass
+
             url = await make_quiz(userbot, req)
             if url:
                 await bot_client.send_message(
