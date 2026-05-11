@@ -3014,6 +3014,28 @@ async def main():
             btns.append([Button.text("🔧 Admin panel", resize=True)])
         return btns
 
+    async def force_update_main_menu(user_id: int, text: str = None):
+        """Reply keyboardni majburan yangilaydi.
+        Telegram ba'zida eski tugmalarni cache qilib qoladi, shuning uchun avval eski keyboardni olib tashlaymiz,
+        keyin user statusiga qarab yangi menu yuboramiz.
+        """
+        if text is None:
+            text = "✅ Menyu yangilandi 👇"
+        try:
+            await bot_client.send_message(user_id, "🔄 Menyu yangilanmoqda...", buttons=Button.clear())
+            await asyncio.sleep(0.4)
+        except Exception as e:
+            log.warning(f"Eski menyuni tozalashda xato: {e}")
+        try:
+            await bot_client.send_message(
+                user_id,
+                text,
+                buttons=main_menu(is_admin(user_id), user_id),
+                link_preview=False
+            )
+        except Exception as e:
+            log.warning(f"Yangi menyu yuborishda xato: {e}")
+
     def profile_menu():
         return [
             [Button.text("💳 To'lov qilish", resize=True),
@@ -3065,7 +3087,7 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
-docx yoki txt farmatda tayyorlab ber
+docx yoki txt fayl qilib ber
 ```
 
 ━━━━━━━━━━━━━━━
@@ -3235,15 +3257,13 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         bot_me3 = await bot_client.get_me()
         plink = f"https://t.me/{bot_me3.username}?start=ref_{target_uid}"
         try:
-            await bot_client.send_message(
+            await force_update_main_menu(
                 target_uid,
                 f"🎉 **Tabriklaymiz! Hamkorlik arizangiz tasdiqlandi!**\n\n"
-                f"✅ Menyu yangilandi. Endi pastdagi asosiy menyuda **🤝 Hamkor paneli** tugmasi chiqadi.\n\n"
+                f"✅ Endi pastdagi asosiy menyuda **🤝 Hamkor paneli** tugmasi chiqadi.\n\n"
                 f"🔗 Sizning shaxsiy havolangiz:\n`{plink}`\n\n"
                 f"💰 Har yangi foydalanuvchi uchun: **+{PARTNER_JOIN_BONUS:,} so'm**\n"
-                f"💳 To'lovlardan ulush: **{PARTNER_PAY_PERCENT}%**",
-                buttons=main_menu(is_admin(target_uid), target_uid),
-                link_preview=False
+                f"💳 To'lovlardan ulush: **{PARTNER_PAY_PERCENT}%**"
             )
         except Exception as e:
             log.warning(f"Hamkorga tasdiq xabari yuborilmadi: {e}")
@@ -4102,9 +4122,9 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         if text == "🤝 Hamkor bo'lish":
             if db_is_partner(uid):
                 # Foydalanuvchi allaqachon hamkor bo'lsa, eski keyboardni majburan yangilaymiz.
-                await event.respond(
-                    "✅ Siz allaqachon hamkorsiz!\n\nMenyu yangilandi — pastda **🤝 Hamkor paneli** tugmasi chiqadi 👇",
-                    buttons=main_menu(adm, uid)
+                await force_update_main_menu(
+                    uid,
+                    "✅ Siz allaqachon hamkorsiz!\n\nPastdagi menyuda **🤝 Hamkor paneli** tugmasi chiqadi 👇"
                 )
                 pinfo = db_get_partner_info(uid)
                 if pinfo:
