@@ -2254,10 +2254,13 @@ async def generate_questions(fan: str, count: int, lang: str = "uz",
                 "q" in q and "opts" in q and "ans" in q and
                 len(q["opts"]) >= 2 and
                 0 <= int(q.get("ans", 0)) < len(q["opts"])):
+            opts = [str(o)[:100] for o in q["opts"]]
+            ans = int(q["ans"])
             valid.append({
                 "q": str(q["q"])[:255],
-                "opts": [str(o)[:100] for o in q["opts"]],
-                "ans": int(q["ans"])
+                "opts": opts,
+                "ans": ans,
+                "correct_text": opts[ans] if 0 <= ans < len(opts) else opts[0]
             })
 
     log.info(f"AI {len(valid)} ta savol yaratdi")
@@ -2356,6 +2359,7 @@ class QuizRequest:
     order_choice: str
     total_variants: int = 1
     source: str = "file"   # "ai" yoki "file"
+    progress_msg_id: Optional[int] = None
 
 @dataclass
 class UserState:
@@ -2508,8 +2512,7 @@ async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
                     await userbot.send_message(qbot, AD_TEXT)
                     await asyncio.sleep(2)
 
-                ans_idx = stable_answer_index(q)
-                await send_poll(userbot, qbot, q["q"], q["opts"], ans_idx)
+                await send_poll(userbot, qbot, q["q"], q["opts"], stable_answer_index(q))
                 log.info(f"  [{i+1}/{len(req.questions)}] OK")
                 await asyncio.sleep(2)
             except Exception as e:
@@ -2542,9 +2545,7 @@ async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
             clicked = False
             for row in msg.reply_markup.rows:
                 for btn in row.buttons:
-                    # Javoblar har safar o'zgarib ketmasligi uchun QuizBot tartibini majburan ketma-ket qilamiz.
-                    target_order = "order"
-                    if target_order in btn.text.lower() or "ketma" in btn.text.lower():
+                    if req.order_choice.lower() in btn.text.lower():
                         await msg.click(text=btn.text); clicked = True; break
                 if clicked: break
             if not clicked:
@@ -2690,7 +2691,7 @@ def _norm_answer_text(x: str) -> str:
     return re.sub(r"\s+", " ", str(x or "")).strip().lower()
 
 def stable_answer_index(q: dict) -> int:
-    """To'g'ri javobni matn bo'yicha qayta topadi. Variantlar joyi almashsa ham xato ketmaydi."""
+    """To'g'ri javobni matn bo'yicha topadi. Variantlar tartibi o'zgarsa ham indeks adashmaydi."""
     opts = q.get("opts") or []
     ans = int(q.get("ans", 0) or 0)
     correct_text = q.get("correct_text")
@@ -2723,7 +2724,7 @@ async def queue_worker():
 async def run_request(userbot, req: QuizRequest):
     import time
     started = time.time()
-    progress_msg = None
+    progress_msg = getattr(req, "progress_msg_id", None)
     progress_task = None
 
     async def progress_loop():
@@ -2742,7 +2743,10 @@ async def run_request(userbot, req: QuizRequest):
                 if progress_msg is None:
                     progress_msg = await bot_client.send_message(req.chat_id, txt)
                 elif txt != last_text:
-                    await progress_msg.edit(txt)
+                    if hasattr(progress_msg, "edit"):
+                        await progress_msg.edit(txt)
+                    else:
+                        await bot_client.edit_message(req.chat_id, progress_msg, txt)
                 last_text = txt
             except Exception as e:
                 if "message was not modified" not in str(e).lower():
@@ -2769,9 +2773,15 @@ async def run_request(userbot, req: QuizRequest):
 
         if progress_msg:
             try:
-                await progress_msg.edit(progress_text(100, len(req.questions), len(req.questions), 0))
-                await asyncio.sleep(1)
-                await progress_msg.delete()
+                done_txt = progress_text(100, len(req.questions), len(req.questions), 0)
+                if hasattr(progress_msg, "edit"):
+                    await progress_msg.edit(done_txt)
+                    await asyncio.sleep(1)
+                    await progress_msg.delete()
+                else:
+                    await bot_client.edit_message(req.chat_id, progress_msg, done_txt)
+                    await asyncio.sleep(1)
+                    await bot_client.delete_messages(req.chat_id, progress_msg)
             except Exception:
                 pass
 
@@ -2822,7 +2832,10 @@ async def run_request(userbot, req: QuizRequest):
             progress_task.cancel()
         try:
             if progress_msg:
-                await progress_msg.delete()
+                if hasattr(progress_msg, "delete"):
+                    await progress_msg.delete()
+                else:
+                    await bot_client.delete_messages(req.chat_id, progress_msg)
         except Exception:
             pass
         try:
@@ -4232,6 +4245,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         # ---- FILE CONFIRMED — namuna ko'rib bo'lgach ----
         if state.step == "file_confirmed":
             if text == "✅ Maqul, davom etamiz":
+                remember_cleanup(uid, getattr(event, 'id', None))
                 await cleanup_user_flow_messages(uid, event.chat_id)
                 q_count = state.total_questions
                 price   = state.__dict__.get("_price", calc_file_price(q_count))
@@ -4323,9 +4337,11 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             state.step = "ask_split"
             user_states[uid] = state
             total = state.total_questions
-            await event.respond(
+            m = await event.respond(
                 f"📚 **{text}** | ❓ {total} savol\n\nHar variantda necha ta?",
-                buttons=variant_btns(total)); return
+                buttons=variant_btns(total))
+            remember_cleanup(uid, getattr(event, 'id', None), getattr(m, 'id', None))
+            return
 
         # ---- VARIANT SONI ----
         if state.step == "ask_split":
@@ -4335,9 +4351,11 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             nv = (total + pv - 1) // pv
             state.step = "ask_time"
             user_states[uid] = state
-            await event.respond(
+            m = await event.respond(
                 f"✅ **{nv} ta variant** × {pv} savol\n\n⏱ Vaqt:",
-                buttons=time_btns()); return
+                buttons=time_btns())
+            remember_cleanup(uid, getattr(event, 'id', None), getattr(m, 'id', None))
+            return
 
         # ---- VAQT ----
         if state.step == "ask_time":
@@ -4364,32 +4382,32 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             state.step = "idle"
             user_states[uid] = state
             qs = state.questions
-            tl = {"15": "15s", "30": "30s", "60": "60s", "0": "Chegarasiz"}
-            new_reqs = [
-                QuizRequest(
-                    user_id=uid, chat_id=event.chat_id,
-                    questions=qs[v*pv:min((v+1)*pv, total)],
-                    fan_name=state.fan_name, variant_num=v+1,
-                    time_choice=state.time_choice,
-                    order_choice=state.order_choice, total_variants=nv,
-                    source=getattr(state, 'source', 'file'),
-                ) for v in range(nv)
-            ]
-            pos = len(request_queue) + 1
-            free_acc = sum(1 for v in account_busy.values() if not v)
-            wait_str = calc_wait(new_reqs)
 
-            await event.respond(
-                f"📋 **Xulosa:**\n\n"
-                f"📚 {state.fan_name}\n"
-                f"❓ {total} savol → {nv} ta variant × {pv}\n"
-                f"⏱ {tl.get(state.time_choice)} | "
-                f"🔀 {'Aralash' if state.order_choice=='shuffle' else 'Ketma-ket'}\n\n"
-                f"📍 Navbat: #{pos}\n"
-                f"🟢 Bo'sh: {free_acc}/{len(account_pool)}\n"
-                f"⏳ ~{wait_str}",
-                buttons=main_menu(adm)
+            # Keraksiz oraliq xabarlarni tozalaymiz: fan, variant, vaqt, tartib, xulosa ko'rinmaydi
+            remember_cleanup(uid, getattr(event, 'id', None))
+            await cleanup_user_flow_messages(uid, event.chat_id)
+
+            first_part_count = len(qs[0:min(pv, total)]) if qs else total
+            initial_progress = await event.respond(
+                progress_text(5, 0, max(first_part_count, 1), estimate_seconds(max(first_part_count, 1))),
+                buttons=main_menu(adm, uid)
             )
+
+            new_reqs = []
+            for v in range(nv):
+                part = qs[v*pv:min((v+1)*pv, total)]
+                new_reqs.append(
+                    QuizRequest(
+                        user_id=uid, chat_id=event.chat_id,
+                        questions=part,
+                        fan_name=state.fan_name, variant_num=v+1,
+                        time_choice=state.time_choice,
+                        order_choice=state.order_choice, total_variants=nv,
+                        source=getattr(state, 'source', 'file'),
+                        progress_msg_id=getattr(initial_progress, 'id', None) if v == 0 else None,
+                    )
+                )
+
             async with queue_lock:
                 for req in new_reqs:
                     request_queue.append(req)
@@ -4453,7 +4471,8 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             await event.respond("Tugmadan tanlang!", buttons=answer_btns(opts)); return
         state.questions.append({
             "q": state.__dict__.get('manual_q_text', ''),
-            "opts": opts, "ans": correct
+            "opts": opts, "ans": correct,
+            "correct_text": opts[correct] if 0 <= correct < len(opts) else (opts[0] if opts else "")
         })
         user_states[uid] = state
         await _ask_manual(event, uid, state)
@@ -5158,21 +5177,15 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
 
                 options = []
                 correct = 0
-                correct_text = None
                 for idx, opt in enumerate(opts_raw):
                     if opt.startswith('#'):
-                        clean_opt = opt[1:].strip()
-                        correct = len(options)
-                        correct_text = clean_opt
-                        options.append(clean_opt)
+                        correct = idx
+                        options.append(opt[1:].strip())
                     else:
                         options.append(opt)
 
-                if correct_text is None and options:
-                    correct_text = options[correct]
-
                 if len(options) >= 2:
-                    qs.append({"q": q_text, "opts": options, "ans": correct, "correct_text": correct_text})
+                    qs.append({"q": q_text, "opts": options, "ans": correct, "correct_text": options[correct] if 0 <= correct < len(options) else options[0]})
 
             if qs:
                 return qs
@@ -5198,7 +5211,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                     i += 1
                     continue
 
-                options, correct, correct_text, opt_idx = [], 0, None, 0
+                options, correct, opt_idx = [], 0, 0
                 i += 1
                 while i < len(lines):
                     vline = lines[i]
@@ -5220,7 +5233,6 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                         if opt_text and not is_separator(opt_text):
                             if is_correct:
                                 correct = opt_idx
-                                correct_text = opt_text
                             options.append(opt_text)
                             opt_idx += 1
                         i += 1
@@ -5228,17 +5240,14 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                         clean = re.sub(r'^#[a-dA-D]?[\.\)]\s*', '', vline[1:]).strip() or vline[1:].strip()
                         if clean and not is_separator(clean):
                             correct = opt_idx
-                            correct_text = clean
                             options.append(clean)
                             opt_idx += 1
                         i += 1
                     else:
                         i += 1
 
-                if correct_text is None and options:
-                    correct_text = options[correct]
                 if q_text and len(options) >= 2:
-                    qs.append({"q": q_text, "opts": options, "ans": correct, "correct_text": correct_text})
+                    qs.append({"q": q_text, "opts": options, "ans": correct})
             else:
                 i += 1
 
