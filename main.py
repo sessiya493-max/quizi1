@@ -1999,7 +1999,7 @@ def db_already_referred(inviter_id: int, invited_id: int) -> bool:
 # ============================================================
 PARTNER_JOIN_BONUS  = 50     # har bir jalb qilgan foydalanuvchi uchun (so'm)
 PARTNER_PAY_PERCENT = 20     # to'lovdan foiz (%)
-PARTNER_MIN_WITHDRAW = 5000  # minimal chiqarish (so'm)
+PARTNER_MIN_WITHDRAW = 15000 # minimal chiqarish (so'm)
 
 def db_init_partner_tables(con):
     """Hamkorlik jadvallarini yaratish (db_init ichida chaqiriladi)"""
@@ -2093,100 +2093,29 @@ def db_partner_add_ref(partner_id: int):
     con.commit()
     con.close()
 
-def db_create_partner_withdrawal(partner_id: int, amount: int, card_num: str) -> Optional[int]:
-    """Pul yechish so'rovini yaratadi. Muhim: balansdan darhol ayrilmaydi."""
+def db_partner_withdraw(partner_id: int, amount: int, card_num: str) -> bool:
     con = get_db()
     row = con.execute("SELECT partner_balance FROM partners WHERE user_id=?", (partner_id,)).fetchone()
-    if not row or row[0] < amount or amount < PARTNER_MIN_WITHDRAW:
+    if not row or row[0] < amount:
         con.close()
-        return None
-    cur = con.execute(
+        return False
+    con.execute("UPDATE partners SET partner_balance = partner_balance - ? WHERE user_id=?", (amount, partner_id))
+    con.execute(
         "INSERT INTO partner_withdrawals (partner_id, amount, card_num, status, created_at) VALUES (?, ?, ?, 'pending', datetime('now'))",
         (partner_id, amount, card_num)
     )
-    wid = cur.lastrowid
     con.commit()
     con.close()
-    return wid
+    return True
 
-def db_get_partner_withdrawal(withdraw_id: int):
+def db_save_partner_application(user_id: int, username: str, full_name: str, comment: str):
     con = get_db()
-    row = con.execute(
-        "SELECT id, partner_id, amount, card_num, status, created_at FROM partner_withdrawals WHERE id=?",
-        (withdraw_id,)
-    ).fetchone()
-    con.close()
-    return row
-
-def db_approve_partner_withdrawal(withdraw_id: int) -> tuple[bool, str, Optional[int], int]:
-    """Admin pul o'tkazganidan keyin tasdiqlaydi va shunda balansdan yechiladi."""
-    con = get_db()
-    row = con.execute(
-        "SELECT partner_id, amount, status FROM partner_withdrawals WHERE id=?",
-        (withdraw_id,)
-    ).fetchone()
-    if not row:
-        con.close()
-        return False, "So'rov topilmadi", None, 0
-    partner_id, amount, status = row
-    if status != 'pending':
-        con.close()
-        return False, "Bu so'rov allaqachon ko'rib chiqilgan", partner_id, amount
-    bal_row = con.execute("SELECT partner_balance FROM partners WHERE user_id=?", (partner_id,)).fetchone()
-    balance = bal_row[0] if bal_row else 0
-    if balance < amount:
-        con.close()
-        return False, f"Hamkor balansida mablag' yetarli emas. Balans: {balance:,} so'm", partner_id, amount
-    con.execute("UPDATE partners SET partner_balance = partner_balance - ? WHERE user_id=?", (amount, partner_id))
-    con.execute("UPDATE partner_withdrawals SET status='paid' WHERE id=?", (withdraw_id,))
-    con.execute(
-        "INSERT INTO partner_log (partner_id, amount, reason, created_at) VALUES (?, ?, ?, datetime('now'))",
-        (partner_id, -amount, f"Yechib olish tasdiqlandi #{withdraw_id}")
-    )
-    con.commit()
-    con.close()
-    return True, "OK", partner_id, amount
-
-def db_reject_partner_withdrawal(withdraw_id: int) -> tuple[bool, Optional[int], int]:
-    con = get_db()
-    row = con.execute(
-        "SELECT partner_id, amount, status FROM partner_withdrawals WHERE id=?",
-        (withdraw_id,)
-    ).fetchone()
-    if not row or row[2] != 'pending':
-        con.close()
-        return False, None, 0
-    partner_id, amount, _ = row
-    con.execute("UPDATE partner_withdrawals SET status='rejected' WHERE id=?", (withdraw_id,))
-    con.commit()
-    con.close()
-    return True, partner_id, amount
-
-def db_save_partner_application(user_id: int, username: str, full_name: str, comment: str) -> int:
-    con = get_db()
-    cur = con.execute("""
+    con.execute("""
         INSERT INTO partner_applications (user_id, username, full_name, comment, status, created_at)
         VALUES (?, ?, ?, ?, 'pending', datetime('now'))
     """, (user_id, username, full_name, comment))
-    app_id = cur.lastrowid
     con.commit()
     con.close()
-    return app_id
-
-def db_update_partner_application_status(app_id: int, status: str):
-    con = get_db()
-    con.execute("UPDATE partner_applications SET status=? WHERE id=?", (status, app_id))
-    con.commit()
-    con.close()
-
-def db_get_partner_application(app_id: int):
-    con = get_db()
-    row = con.execute(
-        "SELECT id, user_id, username, full_name, comment, status, created_at FROM partner_applications WHERE id=?",
-        (app_id,)
-    ).fetchone()
-    con.close()
-    return row
 
 def db_has_pending_application(user_id: int) -> bool:
     con = get_db()
@@ -2532,69 +2461,22 @@ def is_admin(uid): return uid in ADMIN_IDS
 # ============================================================
 #  QUIZ YARATISH (@QuizBot ga yuborish)
 # ============================================================
-async def send_poll(userbot, peer, q, opts, ans, correct_text=None):
-    """
-    @QuizBot ga savol yuborish.
-
-    MUHIM FIX:
-    To'g'ri javob endi faqat indeksga bog'lanmaydi.
-    Parser savoldan correct_text ham saqlaydi.
-    Agar variantlar joyi almashib qolsa ham, bot to'g'ri javob matnini
-    oxirgi variantlar ichidan qayta topadi va shundan keyin correct_answers beradi.
-    """
-    clean_opts = [str(o).strip()[:100] for o in opts if str(o).strip()]
-
-    if not clean_opts:
-        raise ValueError("Variantlar bo'sh")
-
-    # To'g'ri javobni eng ishonchli usulda aniqlaymiz
-    if correct_text:
-        ct = str(correct_text).strip()[:100]
-        found = None
-        for i, opt in enumerate(clean_opts):
-            if opt.strip() == ct:
-                found = i
-                break
-        if found is not None:
-            ans = found
-
-    if ans < 0 or ans >= len(clean_opts):
-        raise ValueError(f"To'g'ri javob indeksi xato: ans={ans}, opts={len(clean_opts)}")
-
-    answers = []
-    for i, opt_text in enumerate(clean_opts):
-        # Telegram MTProto poll option id barqaror bo'lishi kerak
-        # b"0", b"1" ... ishlatamiz
-        answers.append(
-            PollAnswer(
-                text=TextWithEntities(text=opt_text, entities=[]),
-                option=str(i).encode("utf-8")
-            )
-        )
-
-    correct_option = answers[ans].option
-
+async def send_poll(userbot, peer, q, opts, ans):
+    answers = [PollAnswer(
+        text=TextWithEntities(text=o[:100], entities=[]),
+        option=bytes([i])
+    ) for i, o in enumerate(opts)]
     poll = Poll(
-        id=random.randint(1, 2**63 - 1),
-        question=TextWithEntities(text=str(q).strip()[:255], entities=[]),
-        answers=answers,
-        quiz=True,
-        public_voters=False,
-        multiple_choice=False,
-        closed=False,
+        id=random.randint(1, 2**31),
+        question=TextWithEntities(text=q[:255], entities=[]),
+        answers=answers, quiz=True,
+        public_voters=False, multiple_choice=False, closed=False,
     )
-
-    await userbot(
-        SendMediaRequest(
-            peer=peer,
-            media=InputMediaPoll(
-                poll=poll,
-                correct_answers=[correct_option]
-            ),
-            message="",
-            random_id=random.randint(1, 2**63 - 1),
-        )
-    )
+    await userbot(SendMediaRequest(
+        peer=peer,
+        media=InputMediaPoll(poll=poll, correct_answers=[bytes([ans])]),
+        message="", random_id=random.randint(1, 2**63),
+    ))
 
 async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
     try:
@@ -2626,7 +2508,7 @@ async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
                     await userbot.send_message(qbot, AD_TEXT)
                     await asyncio.sleep(2)
 
-                await send_poll(userbot, qbot, q["q"], q["opts"], q["ans"], q.get("correct_text"))
+                await send_poll(userbot, qbot, q["q"], q["opts"], q["ans"])
                 log.info(f"  [{i+1}/{len(req.questions)}] OK")
                 await asyncio.sleep(2)
             except Exception as e:
@@ -2750,55 +2632,6 @@ async def log_action(uid: int, username: str, full_name: str, action: str):
 
 
 # ============================================================
-#  USER CHAT TOZALASH HELPERS
-# ============================================================
-async def safe_delete_message(message):
-    """Bot yuborgan bitta xabarni jim o'chirish."""
-    try:
-        if message:
-            await message.delete()
-    except Exception as e:
-        log.warning(f"Xabar o'chirishda xato: {e}")
-
-
-def remember_cleanup_msg(uid: int, message):
-    """Keyingi bosqichda o'chiriladigan bot xabarlari ID sini saqlaydi."""
-    if not message:
-        return
-    state = user_states.get(uid)
-    if not state:
-        return
-    ids = state.__dict__.get("_cleanup_msg_ids", [])
-    if message.id not in ids:
-        ids.append(message.id)
-    state.__dict__["_cleanup_msg_ids"] = ids[-10:]
-    user_states[uid] = state
-
-
-async def cleanup_user_prompts(uid: int, chat_id: int):
-    """Variant, vaqt, tartib kabi oldingi bot so'rovlarini o'chiradi."""
-    state = user_states.get(uid)
-    if not state:
-        return
-    ids = state.__dict__.pop("_cleanup_msg_ids", [])
-    user_states[uid] = state
-    if not ids:
-        return
-    try:
-        await bot_client.delete_messages(chat_id, ids)
-    except Exception as e:
-        log.warning(f"Cleanup xabarlarini o'chirishda xato: {e}")
-
-
-async def _delete_later(message, seconds: int = 8):
-    try:
-        await asyncio.sleep(seconds)
-        await safe_delete_message(message)
-    except Exception as e:
-        log.warning(f"Kechiktirib o'chirishda xato: {e}")
-
-
-# ============================================================
 #  NAVBAT ISHLOVCHISI
 # ============================================================
 async def queue_worker():
@@ -2817,141 +2650,73 @@ async def queue_worker():
 
 async def run_request(userbot, req: QuizRequest):
     import time
-
+    phone = account_phones.get(id(userbot), "?")
     started = time.time()
-    total_questions = len(req.questions)
-    estimated = max(20, estimate_seconds(total_questions))
-    progress_msg = None
-    make_task = None
-
-    def _bar(percent: int) -> str:
-        filled = max(0, min(10, percent // 10))
-        return "█" * filled + "░" * (10 - filled)
-
-    def _progress_text(percent: int, elapsed: int) -> str:
-        ready = max(0, min(total_questions, int(total_questions * percent / 100)))
-        left = max(0, total_questions - ready)
-        left_seconds = max(0, estimated - elapsed)
-        return (
-            "🚀 **Quiz yaratilmoqda...**\n\n"
-            "Iltimos, kutib turing.\n"
-            "Botdan chiqib ketmang yoki boshqa joyga o‘tmang.\n\n"
-            f"📊 **Jarayon: {percent}%**\n"
-            f"{_bar(percent)}  ({ready} / {total_questions})\n\n"
-            f"⏳ Taxminiy vaqt: ~{format_wait(estimated)}\n"
-            f"✅ Tayyorlangan: {ready} ta\n"
-            f"⌛ Qolgan: {left} ta\n"
-            f"🕐 Qolgan vaqt: ~{format_wait(left_seconds)}\n\n"
-            "💡 Tayyor bo‘lgach, quiz havolasi avtomatik yuboriladi."
-        )
-
-    async def _safe_edit(message, text: str):
-        try:
-            await message.edit(text)
-        except Exception as edit_err:
-            log.warning(f"Quiz progress edit xato: {edit_err}")
-
     try:
-        progress_msg = await bot_client.send_message(
+        await bot_client.send_message(
             req.chat_id,
-            _progress_text(0, 0)
+            f"⏳ **Yaratilmoqda...**\n📚 {req.fan_name} V{req.variant_num}\n"
+            f"❓ {len(req.questions)} savol | 📱 `{phone}`\n"
+            f"🕐 ~{format_wait(estimate_seconds(len(req.questions)))}"
         )
-
-        make_task = asyncio.create_task(make_quiz(userbot, req))
-        last_percent = -1
-
-        while not make_task.done():
-            elapsed_now = int(time.time() - started)
-            percent = min(95, max(1, int((elapsed_now / estimated) * 100)))
-
-            # Juda tez-tez edit bo'lmasligi uchun faqat foiz o'zgarganda yangilaymiz
-            if percent != last_percent:
-                await _safe_edit(progress_msg, _progress_text(percent, elapsed_now))
-                last_percent = percent
-
-            await asyncio.sleep(3)
-
-        url = await make_task
+        url = await make_quiz(userbot, req)
         elapsed = int(time.time() - started)
+        tl = {"15": "15s", "30": "30s", "60": "60s", "0": "Chegarasiz"}
 
         if url:
             # DB ga quiz saqlash
             db_save_quiz(
                 user_id    = req.user_id,
                 fan_name   = req.fan_name,
-                q_count    = total_questions,
+                q_count    = len(req.questions),
                 variant_num= req.variant_num,
                 url        = url,
                 time_choice= req.time_choice,
                 order_type = req.order_choice,
                 source     = getattr(req, 'source', 'file'),
             )
-
-            # Foydalanuvchiga yakuniy progress
-            if progress_msg:
-                await _safe_edit(
-                    progress_msg,
-                    "✅ **Quiz tayyor!**\n\n"
-                    "📊 **Jarayon: 100%**\n"
-                    "██████████\n\n"
-                    f"✅ Tayyorlangan: {total_questions} ta\n"
-                    "⌛ Qolgan: 0 ta\n\n"
-                    "Quyidagi havola orqali quizni oching 👇"
-                )
-
-            # Admin ga xabar — bu foydalanuvchiga ko'rinmaydi
+            # Admin ga xabar
             src = "🤖 AI" if getattr(req, 'source', 'file') == 'ai' else "📂 Fayl"
             await notify_admin(
                 f"✅ **Quiz yaratildi**\n\n"
                 f"👤 user: `{req.user_id}`\n"
                 f"{src} | 📚 {req.fan_name} V{req.variant_num}\n"
-                f"❓ {total_questions} savol | 🕐 {format_wait(elapsed)}\n"
+                f"❓ {len(req.questions)} savol | 🕐 {format_wait(elapsed)}\n"
                 f"🔗 {url}"
             )
-
             await bot_client.send_message(
                 req.chat_id,
                 f"✅ **Quiz tayyor!**\n\n"
+                f"📚 {req.fan_name} — Variant {req.variant_num}\n"
+                f"❓ {len(req.questions)} savol\n"
+                f"⏱ {tl.get(req.time_choice, req.time_choice)} | "
+                f"🔀 {'Aralash' if req.order_choice=='shuffle' else 'Ketma-ket'}\n"
+                f"🕐 {format_wait(elapsed)}\n\n"
                 f"🔗 {url}"
             )
         else:
             # Havola topilmadi — pulni qaytaramiz
-            refund = calc_file_price(total_questions)
+            refund = calc_file_price(len(req.questions))
             db_add_balance(req.user_id, refund, f"Qaytarildi: quiz V{req.variant_num} xato")
             bal_left = db_get_balance(req.user_id)
-            if progress_msg:
-                await _safe_edit(
-                    progress_msg,
-                    "❌ **Quiz yaratishda xato!**\n\n"
-                    "Havola olinmadi — @QuizBot javob bermadi.\n"
-                    f"💰 **{refund:,} so'm qaytarildi**\n"
-                    f"💼 Balans: {bal_left:,} so'm\n\n"
-                    "Qayta urinib ko‘ring."
-                )
-            else:
-                await bot_client.send_message(
-                    req.chat_id,
-                    f"❌ **Quiz yaratishda xato!**\n\n"
-                    f"Havola olinmadi — @QuizBot javob bermadi.\n"
-                    f"💰 **{refund:,} so'm qaytarildi** | Balans: {bal_left:,} so'm\n\n"
-                    f"Qayta urinib ko'ring."
-                )
+            await bot_client.send_message(
+                req.chat_id,
+                f"❌ **Quiz yaratishda xato!**\n\n"
+                f"Havola olinmadi — @QuizBot javob bermadi.\n"
+                f"💰 **{refund:,} so'm qaytarildi** | Balans: {bal_left:,} so'm\n\n"
+                f"Qayta urinib ko'ring:"
+            )
     except Exception as e:
         # Xato — pulni qaytaramiz
         try:
-            if make_task and not make_task.done():
-                make_task.cancel()
-            refund = calc_file_price(total_questions)
+            refund = calc_file_price(len(req.questions))
             db_add_balance(req.user_id, refund, f"Qaytarildi: xato — {str(e)[:50]}")
             bal_left = db_get_balance(req.user_id)
-            text = (
+            await bot_client.send_message(
+                req.chat_id,
                 f"❌ **Xato yuz berdi!**\n\n`{e}`\n\n"
                 f"💰 **{refund:,} so'm qaytarildi** | Balans: {bal_left:,} so'm"
             )
-            if progress_msg:
-                await _safe_edit(progress_msg, text)
-            else:
-                await bot_client.send_message(req.chat_id, text)
         except Exception as e2:
             log.error(f"Qaytarish xatosi: {e2}")
         log.error(f"run_request xato: {e}")
@@ -3011,205 +2776,24 @@ async def main():
     # ============================================================
     #  KNOPKALAR
     # ============================================================
-    def main_menu(adm=False, uid=None, force_partner: bool = False):
-        """Asosiy menyu har safar DB dagi real statusga qarab qayta quriladi.
-        MUHIM: bu menu global/static emas. Shu sabab hamkor tasdiqlangandan keyin
-        `🤝 Hamkor bo'lish` tugmasi `🤝 Hamkor paneli`ga almashadi.
-        """
-        is_p = bool(force_partner) or (uid is not None and db_is_partner(int(uid)))
-        partner_btn = "🤝 Hamkor paneli" if is_p else "🤝 Hamkor bo'lish"
+    def main_menu(adm=False, uid=None):
+        is_partner = db_is_partner(uid) if uid else False
         btns = [
+            [Button.text("🤖 AI test tuzish",       resize=True)],
             [Button.text("📂 Fayldan quiz yaratish", resize=True),
-             Button.text("📋 Mening quizlarim", resize=True)],
-            [Button.text("❓ Yordam", resize=True),
-             Button.text(partner_btn, resize=True)],
-            [Button.text("👤 Profil", resize=True)],
+             Button.text("✏️ Matn kiritish",         resize=True)],
+            [Button.text("📋 Mening quizlarim",      resize=True)],
+            [Button.text("💳 To'lov qilish",         resize=True),
+             Button.text("💰 Balansni ko'rish",      resize=True)],
+            [Button.text("🎁 Referal",               resize=True),
+             Button.text("❓ Yordam",                resize=True)],
         ]
-        if adm:
-            btns.append([Button.text("🔧 Admin panel", resize=True)])
+        if is_partner:
+            btns.append([Button.text("🤝 Hamkor paneli", resize=True)])
+        else:
+            btns.append([Button.text("🤝 Hamkor bo'lish", resize=True)])
+        if adm: btns.append([Button.text("🔧 Admin panel", resize=True)])
         return btns
-
-    def partner_main_menu(uid: int):
-        """Hamkorlar uchun majburiy menu. Eski keyboard qolib ketmasligi uchun alohida ishlatiladi."""
-        return main_menu(is_admin(uid), uid, force_partner=True)
-
-    async def force_update_main_menu(user_id: int, text: str = None, force_partner: bool = False):
-        """Reply keyboardni majburan yangilaydi.
-        1) eski keyboardni olib tashlaydi;
-        2) ozgina kutadi;
-        3) DB statusi yoki force_partner=True bo'yicha yangi keyboard yuboradi.
-        """
-        if text is None:
-            text = "✅ Menyu yangilandi 👇"
-        try:
-            await bot_client.send_message(user_id, "🔄 Menyu yangilanmoqda...", buttons=Button.clear())
-            await asyncio.sleep(0.8)
-        except Exception as e:
-            log.warning(f"Eski menyuni tozalashda xato: {e}")
-        try:
-            if force_partner or db_is_partner(int(user_id)):
-                buttons = partner_main_menu(int(user_id))
-            else:
-                buttons = main_menu(is_admin(int(user_id)), int(user_id))
-            await bot_client.send_message(
-                user_id,
-                text,
-                buttons=buttons,
-                link_preview=False
-            )
-        except Exception as e:
-            log.warning(f"Yangi menyu yuborishda xato: {e}")
-
-    def profile_menu():
-        return [
-            [Button.text("💳 To'lov qilish", resize=True),
-             Button.text("💰 Balansni ko'rish", resize=True)],
-            [Button.text("🎁 Referal", resize=True)],
-            [Button.text("🔙 Bosh menyu", resize=True)],
-        ]
-
-    def file_quiz_guide_text():
-        return """
-📂 **Fayldan quiz yaratish**
-
-Faylingiz botga to'g'ri tushishi uchun avval testlaringizni AI orqali bot shabloniga moslab oling.
-
-✅ **Nima qilish kerak?**
-1. Test faylingizni ChatGPT, Claude, Gemini yoki Groq AI ga yuboring.
-2. Pastdagi promptni ham birga yuboring.
-3. AI qaytargan natijani `.txt` yoki `.docx` fayl qilib saqlang.
-4. Shu faylni botga yuboring.
-
-━━━━━━━━━━━━━━━
-📋 **AI ga yuboriladigan tayyor prompt:**
-
-```
-Ushbu fayldagi BARCHA savollarni o'qib chiq.
-Savollarni aslo qisqartirma, o'zgartirma yoki tashlab ketma.
-
-Agar savollarda tayyor variantlar bo'lsa, ularni saqlab qol.
-Agar variantlar bo'lmasa, har bir savol uchun 4 ta mantiqiy variant yarat.
-
-Natijani FAQAT quyidagi shablonda qaytar:
-
-Savol matni
-=====
-Variant 1
-=====
-#To'g'ri javob
-=====
-Variant 3
-=====
-Variant 4
-+++++
-
-MUHIM QOIDALAR:
-- Har bir savolda faqat 1 ta to'g'ri javob bo'lsin.
-- To'g'ri javob oldiga albatta # belgisi qo'yilsin.
-- Variantlar orasida ===== belgisi bo'lsin.
-- Har bir savol oxirida +++++ belgisi bo'lsin.
-- Hech qanday izoh, kirish so'zi yoki xulosa yozma.
-- Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
-- Savollar sonini kamaytirma.
-```
-
-━━━━━━━━━━━━━━━
-✅ **Bot qabul qiladigan oddiy namuna:**
-
-```
-O'zbekiston poytaxti qaysi shahar?
-=====
-Samarqand
-=====
-#Toshkent
-=====
-Buxoro
-=====
-Xiva
-+++++
-```
-
-📌 **Narx:** Har 25 savolga 1 500 so'm
-_(50 savol = 3 000, 100 savol = 6 000)_
-
-Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
-"""
-
-    def bad_template_guide_text(reason=""):
-        reason_line = f"\n📌 Sabab: {reason}\n" if reason else ""
-        return (
-            "⚠️ **Fayl shablonga mos kelmadi**\n"
-            f"{reason_line}\n"
-            "Bot quiz yaratishi uchun fayl ichida savol, variantlar va to'g'ri javob `#` belgisi bilan aniq ko'rsatilgan bo'lishi kerak.\n\n"
-            "✅ **Nima qiling?**\n"
-            "1. Test faylingizni ChatGPT, Claude, Gemini yoki Gemini/Groq AI ga yuboring.\n"
-            "2. Quyidagi promptni ham birga yuboring.\n"
-            "3. AI qaytargan matnni `.txt`, `.docx` yoki `.pdf` qilib botga qayta yuboring.\n\n"
-            "📋 **AI uchun tayyor prompt:**\n\n"
-            "```\n"
-            "Ushbu fayldagi BARCHA savollarni o'qib chiq.\n"
-            "Savollarni aslo qisqartirma, o'zgartirma yoki tashlab ketma.\n\n"
-            "Agar savollarda tayyor variantlar bo'lsa, ularni saqlab qol.\n"
-            "Agar variantlar bo'lmasa, har bir savol uchun 4 ta mantiqiy variant yarat.\n\n"
-            "Natijani FAQAT quyidagi shablonda qaytar:\n\n"
-            "Savol matni\n"
-            "=====\n"
-            "Variant 1\n"
-            "=====\n"
-            "#To'g'ri javob\n"
-            "=====\n"
-            "Variant 3\n"
-            "=====\n"
-            "Variant 4\n"
-            "+++++\n\n"
-            "MUHIM QOIDALAR:\n"
-            "- Har bir savolda faqat 1 ta to'g'ri javob bo'lsin.\n"
-            "- To'g'ri javob oldiga albatta # belgisi qo'yilsin.\n"
-            "- Variantlar orasida ===== belgisi bo'lsin.\n"
-            "- Har bir savol oxirida +++++ belgisi bo'lsin.\n"
-            "- Hech qanday izoh yozma.\n"
-            "- Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.\n"
-            "```"
-        )
-
-
-
-    # ============================================================
-    #  OVOZLI QO'LLANMALAR — Maxfiy kanal orqali tez yuborish
-    # ============================================================
-    # 1) Maxfiy kanalga 3 ta voice xabar tashlangan.
-    # 2) Bot kanalga admin qilingan bo'lishi kerak.
-    # 3) Bot shu kanaldagi tayyor voice xabarlarni forward qiladi.
-    # Bu usulda Railway serverdan voice upload qilinmaydi.
-
-    VOICE_CHANNEL_ID = int(_os.environ.get("VOICE_CHANNEL_ID", "-1003984400731"))
-
-    START_VOICE_MSG_ID = int(_os.environ.get("START_VOICE_MSG_ID", "2"))
-    TEMPLATE_VOICE_MSG_ID = int(_os.environ.get("TEMPLATE_VOICE_MSG_ID", "3"))
-    PROGRESS_VOICE_MSG_ID = int(_os.environ.get("PROGRESS_VOICE_MSG_ID", "4"))
-
-    async def send_voice_from_channel(chat_id: int, msg_id: int):
-        """Maxfiy kanaldagi tayyor voice xabarni foydalanuvchiga forward qiladi."""
-        if not msg_id:
-            return
-        try:
-            await bot_client.forward_messages(
-                entity=chat_id,
-                messages=msg_id,
-                from_peer=VOICE_CHANNEL_ID
-            )
-        except Exception as e:
-            log.warning(f"Voice kanal orqali yuborishda xato: {e}")
-
-    async def send_start_voice(chat_id: int):
-        await send_voice_from_channel(chat_id, START_VOICE_MSG_ID)
-
-    async def send_template_voice(chat_id: int):
-        await send_voice_from_channel(chat_id, TEMPLATE_VOICE_MSG_ID)
-
-    async def send_progress_voice(chat_id: int):
-        await send_voice_from_channel(chat_id, PROGRESS_VOICE_MSG_ID)
-
 
     def ai_settings_btns(state: UserState):
         topic_show = state.topic if state.topic else "Barcha mavzu"
@@ -3258,198 +2842,73 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
     #  HANDLERLAR
     # ============================================================
 
-
-    @bot_client.on(events.CallbackQuery(pattern=b"partner_approve:"))
-    async def on_partner_approve(event):
-        if event.sender_id not in ADMIN_IDS:
-            await event.answer("Siz admin emassiz", alert=True)
-            return
-        try:
-            _, app_id_s, uid_s = event.data.decode().split(":")
-            app_id = int(app_id_s)
-            target_uid = int(uid_s)
-        except Exception:
-            await event.answer("Noto'g'ri callback", alert=True)
-            return
-        app = db_get_partner_application(app_id)
-        if app and app[5] != 'pending':
-            await event.answer("Bu ariza allaqachon ko'rib chiqilgan", alert=True)
-            return
-        db_add_partner(target_uid)
-        db_update_partner_application_status(app_id, 'approved')
-        bot_me3 = await bot_client.get_me()
-        plink = f"https://t.me/{bot_me3.username}?start=ref_{target_uid}"
-        try:
-            await force_update_main_menu(
-                target_uid,
-                f"🎉 **Tabriklaymiz! Hamkorlik arizangiz tasdiqlandi!**\n\n"
-                f"✅ Endi pastdagi asosiy menyuda **🤝 Hamkor paneli** tugmasi chiqadi.\n\n"
-                f"🔗 Sizning shaxsiy havolangiz:\n`{plink}`\n\n"
-                f"💰 Har yangi foydalanuvchi uchun: **+{PARTNER_JOIN_BONUS:,} so'm**\n"
-                f"💳 To'lovlardan ulush: **{PARTNER_PAY_PERCENT}%**",
-                force_partner=True
-            )
-        except Exception as e:
-            log.warning(f"Hamkorga tasdiq xabari yuborilmadi: {e}")
-        try:
-            await event.edit("✅ Hamkorlik arizasi tasdiqlandi. Foydalanuvchiga xabar yuborildi.")
-        except Exception:
-            pass
-        await event.answer("Tasdiqlandi")
-
-    @bot_client.on(events.CallbackQuery(pattern=b"partner_reject:"))
-    async def on_partner_reject(event):
-        if event.sender_id not in ADMIN_IDS:
-            await event.answer("Siz admin emassiz", alert=True)
-            return
-        try:
-            _, app_id_s, uid_s = event.data.decode().split(":")
-            app_id = int(app_id_s)
-            target_uid = int(uid_s)
-        except Exception:
-            await event.answer("Noto'g'ri callback", alert=True)
-            return
-        db_update_partner_application_status(app_id, 'rejected')
-        try:
-            await bot_client.send_message(
-                target_uid,
-                "❌ Hamkorlik arizangiz hozircha tasdiqlanmadi.\n\nKeyinroq qayta ariza qoldirishingiz mumkin.",
-                buttons=main_menu(is_admin(target_uid), target_uid)
-            )
-        except Exception:
-            pass
-        try:
-            await event.edit("❌ Hamkorlik arizasi rad etildi.")
-        except Exception:
-            pass
-        await event.answer("Rad etildi")
-
-    @bot_client.on(events.CallbackQuery(data=b"partner_withdraw_start"))
-    async def on_partner_withdraw_start(event):
-        uid = event.sender_id
-        if not db_is_partner(uid):
-            await event.answer("Siz hamkor emassiz", alert=True)
-            return
-        pinfo = db_get_partner_info(uid)
-        pbal = pinfo[1] if pinfo else 0
-        if pbal < PARTNER_MIN_WITHDRAW:
-            await event.answer(f"Minimal {PARTNER_MIN_WITHDRAW:,} so'm", alert=True)
-            return
-        user_states[uid] = UserState(step="wait_partner_card")
-        await event.respond(
-            f"💸 **Pulni yechib olish**\n\n"
-            f"💰 Yechib olish summasi: **{pbal:,} so'm**\n\n"
-            f"Karta raqamingizni yuboring:\n"
-            f"_(16 raqam, masalan: 8600 1234 5678 9012)_",
-            buttons=[[Button.text("🔙 Bosh menyu")]]
-        )
-        await event.answer()
-
-    @bot_client.on(events.CallbackQuery(pattern=b"withdraw_approve:"))
-    async def on_withdraw_approve(event):
-        if event.sender_id not in ADMIN_IDS:
-            await event.answer("Siz admin emassiz", alert=True)
-            return
-        try:
-            withdraw_id = int(event.data.decode().split(":", 1)[1])
-        except Exception:
-            await event.answer("Noto'g'ri callback", alert=True)
-            return
-        row = db_get_partner_withdrawal(withdraw_id)
-        ok, msg, partner_id, amount = db_approve_partner_withdrawal(withdraw_id)
-        if not ok:
-            await event.answer(msg, alert=True)
-            return
-        try:
-            await bot_client.send_message(
-                partner_id,
-                f"✅ **Pul kartangizga o'tkazildi!**\n\n"
-                f"💰 Summa: **{amount:,} so'm**\n"
-                f"🧾 So'rov ID: `{withdraw_id}`\n\n"
-                f"Hamkor balansingizdan shu summa yechildi.",
-                buttons=main_menu(is_admin(partner_id), partner_id)
-            )
-        except Exception:
-            pass
-        try:
-            card = row[3] if row else ''
-            await event.edit(
-                f"✅ Pul o'tkazish tasdiqlandi.\n\n"
-                f"👤 Hamkor ID: `{partner_id}`\n"
-                f"💰 Summa: **{amount:,} so'm**\n"
-                f"💳 Karta: `{card}`"
-            )
-        except Exception:
-            pass
-        await event.answer("Tasdiqlandi")
-
-    @bot_client.on(events.CallbackQuery(pattern=b"withdraw_reject:"))
-    async def on_withdraw_reject(event):
-        if event.sender_id not in ADMIN_IDS:
-            await event.answer("Siz admin emassiz", alert=True)
-            return
-        try:
-            withdraw_id = int(event.data.decode().split(":", 1)[1])
-        except Exception:
-            await event.answer("Noto'g'ri callback", alert=True)
-            return
-        ok, partner_id, amount = db_reject_partner_withdrawal(withdraw_id)
-        if not ok:
-            await event.answer("So'rov topilmadi yoki allaqachon ko'rib chiqilgan", alert=True)
-            return
-        try:
-            await bot_client.send_message(
-                partner_id,
-                f"❌ **Pul yechish arizangiz rad etildi.**\n\n"
-                f"💰 Summa: **{amount:,} so'm**\n"
-                f"Balansingizdan pul yechilmadi.",
-                buttons=main_menu(is_admin(partner_id), partner_id)
-            )
-        except Exception:
-            pass
-        try:
-            await event.edit("❌ Pul yechish arizasi rad etildi. Balansdan pul yechilmadi.")
-        except Exception:
-            pass
-        await event.answer("Rad etildi")
-
     @bot_client.on(events.NewMessage(pattern=r"/addpartner(?:\s+(\d+))?"))
     async def cmd_addpartner(event):
+        """Admin userni hamkor sifatida tasdiqlaydi va user menyusini majburan yangilaydi."""
         if event.sender_id not in ADMIN_IDS:
             return
+
         match = re.match(r'/addpartner\s+(\d+)', event.raw_text.strip())
         if not match:
             await event.respond("❌ Ishlatish: `/addpartner USER_ID`")
             return
+
         target_uid = int(match.group(1))
+
+        # 1) Hamkorni DB ga yozamiz
         db_add_partner(target_uid)
+
+        # 2) Shu userning pending arizalarini approved qilamiz
+        try:
+            con = get_db()
+            con.execute(
+                "UPDATE partner_applications SET status='approved' WHERE user_id=? AND status='pending'",
+                (target_uid,)
+            )
+            con.commit()
+            con.close()
+        except Exception as e:
+            log.warning(f"partner_applications status update xato: {e}")
+
         await event.respond(f"✅ `{target_uid}` hamkor sifatida qo'shildi!")
+
+        # 3) Userga eski keyboardni yopadigan xabar yuboramiz
+        # Telethon Button.clear() hamma versiyada bor; yo'q bo'lsa xato qilmay o'tamiz.
+        try:
+            await bot_client.send_message(
+                target_uid,
+                "🔄 Menyu yangilanmoqda...",
+                buttons=Button.clear()
+            )
+        except Exception:
+            pass
+
+        # 4) Userga yangi menu yuboramiz: Hamkor bo'lish o'rniga Hamkor paneli chiqadi
         try:
             bot_me3 = await bot_client.get_me()
             plink = f"https://t.me/{bot_me3.username}?start=ref_{target_uid}"
-            await force_update_main_menu(
+            await bot_client.send_message(
                 target_uid,
                 f"🎉 **Tabriklaymiz! Siz hamkor bo'ldingiz!**\n\n"
                 f"🔗 Sizning shaxsiy havolangiz:\n`{plink}`\n\n"
                 f"📢 Bu havolani kanal, guruh va ijtimoiy tarmoqlarda ulashing!\n\n"
                 f"💰 Har jalb: +{PARTNER_JOIN_BONUS} so'm\n"
                 f"💳 Har to'lovdan: {PARTNER_PAY_PERCENT}%\n\n"
-                f"✅ Pastdagi menyu yangilandi. Endi **🤝 Hamkor paneli** tugmasi chiqadi 👇",
-                force_partner=True
+                f"Endi pastdagi **🤝 Hamkor paneli** tugmasi orqali balans va referallarni ko'rishingiz mumkin 👇",
+                buttons=main_menu(is_admin(target_uid), target_uid)
             )
         except Exception as e:
             await event.respond(f"⚠️ Foydalanuvchiga xabar yuborilmadi: {e}")
 
-    @bot_client.on(events.NewMessage(pattern=r"/fixmenu"))
-    async def cmd_fixmenu(event):
-        """User o'zi bosadi: menyuni DB statusiga qarab majburan yangilaydi."""
-        uid = event.sender_id
-        await force_update_main_menu(
-            uid,
-            "✅ Menyu qayta yuklandi 👇",
-            force_partner=db_is_partner(uid)
-        )
 
+    @bot_client.on(events.NewMessage(pattern=r"/(fixmenu|menu)$"))
+    async def cmd_fixmenu(event):
+        """Foydalanuvchiga statusiga mos menyuni qayta yuboradi."""
+        uid = event.sender_id
+        await event.respond(
+            "🏠 Menyu yangilandi",
+            buttons=main_menu(is_admin(uid), uid)
+        )
 
     async def user_is_subscribed(user_id: int) -> bool:
         settings = db_get_subscription_settings()
@@ -3494,7 +2953,6 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             bonus_msg += f"\n\n🎁 **Referal bonusi: +{REFERRAL_BONUS:,} so'm** balansga qo'shildi!"
             if db_is_partner(inviter_id):
                 db_add_partner_balance(inviter_id, PARTNER_JOIN_BONUS, f"Yangi foydalanuvchi: {uid}")
-                db_partner_add_ref(inviter_id)
                 db_partner_add_ref(inviter_id)
             try:
                 await bot_client.send_message(
@@ -3587,12 +3045,11 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
 
         await event.respond(
             f"👋 **Salom! AI Quiz Bot**\n\n"
-            f"📂 Fayldan @QuizBot uchun quiz yarating!\n"
-            f"📁 DOCX, PDF yoki TXT fayl yuboring{ref_bonus_msg}\n\n"
+            f"🤖 AI yordamida istalgan fandan test tuzing!\n"
+            f"📁 Fayl yuklang yoki matn kiriting{ref_bonus_msg}\n\n"
             f"Boshlash uchun tugmani bosing 👇",
             buttons=main_menu(is_admin(uid), uid)
         )
-        await send_start_voice(uid)
 
 
     @bot_client.on(events.CallbackQuery(data=b"agree_terms"))
@@ -3642,11 +3099,10 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         await bot_client.send_message(
             uid,
             f"🏠 **Asosiy menyu**\n\n"
-            f"📂 Fayldan @QuizBot uchun quiz yarating!\n"
-            f"📁 DOCX, PDF yoki TXT fayl yuboring{bonus_msg}",
+            f"🤖 AI yordamida istalgan fandan test tuzing!\n"
+            f"📁 Fayl yuklang yoki matn kiriting{bonus_msg}",
             buttons=main_menu(is_admin(uid), uid)
         )
-        await send_start_voice(uid)
 
     @bot_client.on(events.CallbackQuery(data=b"check_subscription"))
     async def on_check_subscription(event):
@@ -3671,11 +3127,10 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             await bot_client.send_message(
                 uid,
                 f"🏠 **Asosiy menyu**\n\n"
-                f"📂 Fayldan @QuizBot uchun quiz yarating!\n"
-                f"📁 DOCX, PDF yoki TXT fayl yuboring.",
+                f"🤖 AI yordamida istalgan fandan test tuzing!\n"
+                f"📁 Fayl yuklang yoki matn kiriting.",
                 buttons=main_menu(is_admin(uid), uid)
             )
-            await send_start_voice(uid)
         else:
             await event.answer("Hali a'zo bo'lmagansiz yoki bot tekshira olmadi.", alert=True)
             await show_subscription_prompt(event, uid)
@@ -3773,25 +3228,9 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
 
             log.info(f"Fayl: name={fname}, mime={mime}, user={uid}")
 
-            supported_docx = fname.endswith(".docx") or "officedocument.wordprocessingml" in mime
-            supported_pdf  = fname.endswith(".pdf") or "pdf" in mime
-            supported_txt  = fname.endswith(".txt") or mime.startswith("text/") or mime in ("application/octet-stream", "")
-
-            # Rasm/video/audio yoki boshqa fayllardan quiz tuzmaymiz.
-            # Aks holda rasm baytlari matn deb o'qilib, minglab noto'g'ri qator chiqishi mumkin.
-            if not (supported_docx or supported_pdf or supported_txt):
-                await msg.edit(
-                    bad_template_guide_text(
-                        "Bot faqat DOCX, PDF yoki TXT formatdagi matnli test faylini qabul qiladi. Rasm yuborilgan bo'lsa, avval rasm ichidagi savollarni AI/OCR orqali matnga aylantiring."
-                    ),
-                    buttons=[[Button.text("📂 Fayldan quiz yaratish")], [Button.text("🔙 Bosh menyu")]]
-                )
-                await send_template_voice(uid)
-                return
-
             content = ""
 
-            if supported_docx:
+            if fname.endswith(".docx") or "officedocument.wordprocessingml" in mime:
                 try:
                     from docx import Document
 
@@ -3824,7 +3263,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                     await msg.edit(f"❌ DOCX o'qishda xato: {e}")
                     return
 
-            elif supported_pdf:
+            elif fname.endswith(".pdf") or "pdf" in mime:
                 try:
                     import PyPDF2
                     reader = PyPDF2.PdfReader(io.BytesIO(data))
@@ -3848,8 +3287,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 return
 
             qs = _parse_questions(content)
-            parse_errors = getattr(_parse_questions, "last_errors", [])
-            log.info(f"Parse natija: {len(qs)} savol, errors={len(parse_errors)}, user={uid}")
+            log.info(f"Parse natija: {len(qs)} savol, user={uid}")
 
             if qs:
                 q_count = len(qs)
@@ -3867,8 +3305,10 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 log.info(f"State saqlandi: step=file_preview, {q_count} savol, user={uid}")
 
                 # ── 5 ta random savol QuizBot ga yuborib preview ko'rsatish ──
-                # Oldingi "o'qilmoqda / savol topildi" xabari chatda qolib ketmasin
-                await safe_delete_message(msg)
+                await msg.edit(
+                    f"📂 **{q_count} ta savol topildi!**\n\n"
+                    f"⏳ Namuna sifatida 5 ta savol quiz qilinmoqda..."
+                )
 
                 preview_count = min(5, q_count)
                 preview_qs = random.sample(qs, preview_count)
@@ -3898,19 +3338,33 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                     await _show_file_price(event.chat_id, uid, q_count, price, bal, blocks)
 
             else:
-                # Shablon topilmadi — endi manual rejimga o'tkazmaymiz.
-                # Foydalanuvchiga aniq tushuntirish va AI prompt beramiz.
+                # Shablon topilmadi — manual (bepul)
                 lines = [l.strip() for l in content.splitlines() if l.strip()]
-                reason = f"{len(lines)} ta qator topildi, lekin savol/variant/#to'g'ri javob formatini aniqlay olmadim."
-                if parse_errors:
-                    reason += " " + "; ".join(str(x) for x in parse_errors[:2])
-                user_states.pop(uid, None)
+                if not lines:
+                    await msg.edit("❌ Faylda matn topilmadi!")
+                    return
+
+                state = UserState(step="manual_start")
+                state.__dict__['raw_lines']     = lines
+                state.__dict__['manual_q_idx']  = 0
+                state.__dict__['manual_q_text'] = ""
+                state.__dict__['manual_opts']   = []
+                user_states[uid] = state
+                log.info(f"Manual rejim: {len(lines)} qator, user={uid}")
+
                 await msg.edit(
-                    bad_template_guide_text(reason),
-                    buttons=[[Button.text("📂 Fayldan quiz yaratish")], [Button.text("🔙 Bosh menyu")]]
+                    f"⚠️ **Shablon aniqlanmadi**\n\n"
+                    f"{len(lines)} ta qator topildi.\n"
+                    f"To'g'ri javoblarni siz belgilaysiz 👇\n"
+                    f"_(Bu rejim bepul)_"
                 )
-                await send_template_voice(uid)
-                return
+                await event.respond(
+                    "Davom etamizmi?",
+                    buttons=[
+                        [Button.text("▶️ Davom etish")],
+                        [Button.text("🔙 Bosh menyu")],
+                    ]
+                )
 
         except Exception as e:
             log.error(f"on_file xato: {e}", exc_info=True)
@@ -4076,21 +3530,6 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             await event.respond("🏠 Bosh menyu", buttons=main_menu(adm, uid))
             return
 
-        if text == "👤 Profil":
-            bal = db_get_balance(uid)
-            ref_count = db_get_referral_count(uid)
-            partner_status = "✅ Faol" if db_is_partner(uid) else "❌ Yo'q"
-            await event.respond(
-                f"👤 **Profil**\n\n"
-                f"🆔 ID: `{uid}`\n"
-                f"💰 Balans: **{bal:,} so'm**\n"
-                f"🎁 Referallar: **{ref_count} ta**\n"
-                f"🤝 Hamkorlik: {partner_status}\n\n"
-                f"Kerakli bo'limni tanlang 👇",
-                buttons=profile_menu()
-            )
-            return
-
         if text == "📋 Mening quizlarim":
             quizzes = db_get_user_quizzes(uid, limit=20)
             total_q = db_count_user_quizzes(uid)
@@ -4099,7 +3538,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                     "📋 **Mening quizlarim**\n\n"
                     "Hali quiz yaratmagansiz.\n\n"
                     "🤖 AI yoki 📂 fayl orqali quiz tuzing!",
-                    buttons=main_menu(adm, uid)
+                    buttons=main_menu(adm)
                 )
                 return
 
@@ -4156,33 +3595,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         # ---- HAMKOR BO'LISH ----
         if text == "🤝 Hamkor bo'lish":
             if db_is_partner(uid):
-                # Foydalanuvchi allaqachon hamkor bo'lsa, eski keyboardni majburan yangilaymiz.
-                await force_update_main_menu(
-                    uid,
-                    "✅ Siz allaqachon hamkorsiz!\n\nPastdagi menyuda **🤝 Hamkor paneli** tugmasi chiqadi 👇",
-                    force_partner=True
-                )
-                pinfo = db_get_partner_info(uid)
-                if pinfo:
-                    _, pbal, total_earned, total_refs = pinfo
-                else:
-                    pbal, total_earned, total_refs = 0, 0, 0
-                bot_me2 = await bot_client.get_me()
-                plink = f"https://t.me/{bot_me2.username}?start=ref_{uid}"
-                await event.respond(
-                    f"🤝 **HAMKOR PANELI**\n\n"
-                    f"━━━━━━━━━━━━━━━━━━━\n"
-                    f"💰 **Hamkor balansi:** {pbal:,} so'm\n"
-                    f"📈 **Jami daromad:** {total_earned:,} so'm\n"
-                    f"👥 **Taklif qilganlar:** {total_refs} ta\n"
-                    f"━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"🔗 **Hamkorlik havolangiz:**\n`{plink}`\n\n"
-                    f"Quyidagi bo'limlardan birini tanlang 👇",
-                    buttons=[
-                        [Button.text("💰 Hamkor balans"), Button.text("🔗 Hamkorlik referali")],
-                        [Button.text("🔙 Bosh menyu")],
-                    ]
-                )
+                await event.respond("✅ Siz allaqachon hamkorsiz!", buttons=main_menu(adm, uid))
                 return
             await event.respond(
                 "🤝 **HAMKORLIK DASTURI**\n\n"
@@ -4196,7 +3609,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 "  2. Admin tasdiqlaydi\n"
                 "  3. Maxsus havola olasiz\n"
                 "  4. Havolani ijtimoiy tarmoqlarda ulashing\n"
-                "  5. Balansni kartaga chiqaring (min 5 000 so'm)\n\n"
+                "  5. Balansni kartaga chiqaring (min 15 000 so'm)\n\n"
                 "━━━━━━━━━━━━━━━━━━━\n"
                 "📌 Ariza qoldirishni xohlaysizmi?",
                 buttons=[
@@ -4208,7 +3621,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
 
         if text == "📝 Ariza qoldirish":
             if db_is_partner(uid):
-                await event.respond("✅ Siz allaqachon hamkorsiz!", buttons=partner_main_menu(uid))
+                await event.respond("✅ Siz allaqachon hamkorsiz!", buttons=main_menu(adm, uid))
                 return
             if db_has_pending_application(uid):
                 await event.respond(
@@ -4232,27 +3645,17 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             ln = getattr(sender2, 'last_name', '') or ''
             un = getattr(sender2, 'username', '') or ''
             fn2 = f"{fn} {ln}".strip() or un or str(uid)
-            app_id = db_save_partner_application(uid, un, fn2, comment)
+            db_save_partner_application(uid, un, fn2, comment)
             user_states[uid] = UserState()
             # Adminga xabar
             uname_str = f"@{un}" if un else f"ID: {uid}"
-            for aid in ADMIN_IDS:
-                try:
-                    await bot_client.send_message(
-                        aid,
-                        f"🤝 **Yangi hamkorlik arizasi**\n\n"
-                        f"👤 {fn2} ({uname_str})\n"
-                        f"🆔 `{uid}`\n"
-                        f"📝 Ariza ID: `{app_id}`\n\n"
-                        f"💬 Ariza matni:\n{comment}\n\n"
-                        f"Tasdiqlasangiz, foydalanuvchida **🤝 Hamkor bo'lish** tugmasi **🤝 Hamkor paneli**ga almashadi.",
-                        buttons=[
-                            [Button.inline("✅ Tasdiqlash", data=f"partner_approve:{app_id}:{uid}".encode())],
-                            [Button.inline("❌ Rad etish", data=f"partner_reject:{app_id}:{uid}".encode())],
-                        ]
-                    )
-                except Exception as e:
-                    log.warning(f"Hamkor arizasini adminga yuborib bo'lmadi {aid}: {e}")
+            await notify_admin(
+                f"🤝 **Yangi hamkorlik arizasi**\n\n"
+                f"👤 {fn2} ({uname_str})\n"
+                f"🆔 `{uid}`\n\n"
+                f"💬 Ariza matni:\n{comment}\n\n"
+                f"✅ Tasdiqlash uchun: `/addpartner {uid}`"
+            )
             await event.respond(
                 "✅ **Arizangiz qabul qilindi!**\n\n"
                 "Admin tez orada ko'rib chiqadi va javob beradi.\n"
@@ -4278,59 +3681,15 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"💰 **Hamkor balansi:** {pbal:,} so'm\n"
                 f"📈 **Jami daromad:** {total_earned:,} so'm\n"
-                f"👥 **Taklif qilganlar:** {total_refs} ta\n"
+                f"👥 **Jalb qilganlar:** {total_refs} ta\n"
                 f"━━━━━━━━━━━━━━━━━━━\n\n"
-                f"Quyidagi bo'limlardan birini tanlang 👇",
+                f"🔗 **Sizning havolangiz:**\n`{plink}`\n\n"
+                f"📢 Bu havolani kanal, guruh yoki ijtimoiy tarmoqlarda ulashing!\n\n"
+                f"💸 Minimal chiqarish: {PARTNER_MIN_WITHDRAW:,} so'm",
                 buttons=[
-                    [Button.text("💰 Hamkor balans"), Button.text("🔗 Hamkorlik referali")],
+                    [Button.text("💸 Pul chiqarish")],
                     [Button.text("🔙 Bosh menyu")],
                 ]
-            )
-            return
-
-        if text == "💰 Hamkor balans":
-            if not db_is_partner(uid):
-                await event.respond("⛔ Siz hamkor emassiz!", buttons=main_menu(adm, uid))
-                return
-            pinfo = db_get_partner_info(uid)
-            _, pbal, total_earned, total_refs = pinfo if pinfo else (uid, 0, 0, 0)
-            text_bal = (
-                f"💰 **HAMKOR BALANSI**\n\n"
-                f"👥 Taklif qilgan odamlaringiz: **{total_refs} ta**\n"
-                f"💵 Hozirgi balans: **{pbal:,} so'm**\n"
-                f"📈 Jami ishlab topilgan: **{total_earned:,} so'm**\n"
-                f"📌 Minimal yechib olish: **{PARTNER_MIN_WITHDRAW:,} so'm**\n\n"
-            )
-            if pbal >= PARTNER_MIN_WITHDRAW:
-                text_bal += "✅ Balansingiz yetarli. Pulni kartaga yechib olishingiz mumkin."
-                buttons_bal = [[Button.inline("💸 Pulni yechib olish", data=b"partner_withdraw_start")], [Button.text("🤝 Hamkor paneli")]]
-            else:
-                text_bal += (
-                    "❌ Hali yechib ololmaysiz.\n"
-                    f"Yechib olish uchun kamida **{PARTNER_MIN_WITHDRAW:,} so'm** bo'lishi kerak.\n"
-                    "Ko'proq foydalanuvchi taklif qiling."
-                )
-                buttons_bal = [[Button.text("🤝 Hamkor paneli")], [Button.text("🔙 Bosh menyu")]]
-            await event.respond(text_bal, buttons=buttons_bal)
-            return
-
-        if text == "🔗 Hamkorlik referali":
-            if not db_is_partner(uid):
-                await event.respond("⛔ Siz hamkor emassiz!", buttons=main_menu(adm, uid))
-                return
-            pinfo = db_get_partner_info(uid)
-            _, pbal, total_earned, total_refs = pinfo if pinfo else (uid, 0, 0, 0)
-            bot_me2 = await bot_client.get_me()
-            plink = f"https://t.me/{bot_me2.username}?start=ref_{uid}"
-            await event.respond(
-                f"🔗 **HAMKORLIK REFERALI**\n\n"
-                f"Sizning maxsus havolangiz:\n`{plink}`\n\n"
-                f"👥 Taklif qilganlar: **{total_refs} ta**\n"
-                f"💰 Har yangi foydalanuvchi uchun: **+{PARTNER_JOIN_BONUS:,} so'm**\n"
-                f"💳 To'lovlardan ulush: **{PARTNER_PAY_PERCENT}%**\n\n"
-                f"Havolani kanal, guruh yoki ijtimoiy tarmoqlarda ulashing.",
-                buttons=[[Button.text("🤝 Hamkor paneli")], [Button.text("🔙 Bosh menyu")]],
-                link_preview=False
             )
             return
 
@@ -4370,56 +3729,43 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             pinfo = db_get_partner_info(uid)
             pbal = pinfo[1] if pinfo else 0
             formatted_card = ' '.join([card_input[i:i+4] for i in range(0, 16, 4)])
-            withdraw_id = db_create_partner_withdrawal(uid, pbal, formatted_card)
+            ok = db_partner_withdraw(uid, pbal, formatted_card)
             user_states[uid] = UserState()
-            if withdraw_id:
+            if ok:
                 sender3 = await event.get_sender()
                 un3 = getattr(sender3, 'username', '') or ''
                 ustr = f"@{un3}" if un3 else f"ID: {uid}"
-                for aid in ADMIN_IDS:
-                    try:
-                        await bot_client.send_message(
-                            aid,
-                            f"💸 **Hamkor pul yechish arizasi**\n\n"
-                            f"👤 {ustr} (`{uid}`)\n"
-                            f"🧾 So'rov ID: `{withdraw_id}`\n"
-                            f"💰 Summa: **{pbal:,} so'm**\n"
-                            f"💳 Karta: `{formatted_card}`\n\n"
-                            f"Avval pulni kartaga o'tkazing. Keyin **Tasdiqlash** tugmasini bosing.\n"
-                            f"Tasdiqlangandan keyingina balansdan {pbal:,} so'm yechiladi.",
-                            buttons=[
-                                [Button.inline("✅ Pul o'tkazildi, tasdiqlash", data=f"withdraw_approve:{withdraw_id}".encode())],
-                                [Button.inline("❌ Rad etish", data=f"withdraw_reject:{withdraw_id}".encode())],
-                            ]
-                        )
-                    except Exception as e:
-                        log.warning(f"Withdraw arizasini adminga yuborib bo'lmadi {aid}: {e}")
-                await event.respond(
-                    f"✅ **Pul yechish arizasi yuborildi!**\n\n"
+                await notify_admin(
+                    f"💸 **Hamkor chiqarish so'rovi**\n\n"
+                    f"👤 {ustr} (`{uid}`)\n"
                     f"💰 Summa: **{pbal:,} so'm**\n"
                     f"💳 Karta: `{formatted_card}`\n\n"
-                    f"⏳ Admin kartangizga pul o'tkazgach, arizani tasdiqlaydi.\n"
-                    f"Shundan keyin balansingizdan summa yechiladi.",
-                    buttons=[[Button.text("🤝 Hamkor paneli")], [Button.text("🔙 Bosh menyu")]]
+                    f"Iltimos o'tkazing!"
+                )
+                await event.respond(
+                    f"✅ **So'rov yuborildi!**\n\n"
+                    f"💰 {pbal:,} so'm → `{formatted_card}`\n\n"
+                    f"Admin tez orada o'tkazadi.",
+                    buttons=[[Button.text("🔙 Bosh menyu")]]
                 )
             else:
-                await event.respond(
-                    f"❌ So'rov yaratilmadi. Balansingiz kam bo'lishi yoki oldinroq o'zgargan bo'lishi mumkin.",
-                    buttons=[[Button.text("🤝 Hamkor paneli")], [Button.text("🔙 Bosh menyu")]]
-                )
+                await event.respond("❌ Xato yuz berdi!", buttons=[[Button.text("🔙 Bosh menyu")]])
             return
 
         if text == "❓ Yordam":
             await event.respond(
                 "📋 **YORDAM**\n\n"
-                "**📂 Fayldan quiz yaratish** — har 25 savolga 1 500 so'm\n"
-                "Tayyor testingizni DOCX, PDF yoki TXT ko'rinishida yuklang, bot quizga aylantiradi.\n\n"
-                "Agar faylingiz shablonga mos bo'lmasa, bot sizga AI uchun tayyor prompt beradi.\n\n"
+                "**🤖 AI test tuzish** — 2 000 so'm\n"
+                "Istalgan fan va mavzudan AI avtomatik test tuzadi\n\n"
+                "**📂 Fayldan quiz yaratish** — har 25 savolga 2 000 so'm\n"
+                "Tayyor testingizni yuklang, bot quizga aylantiradi\n\n"
                 "━━━━━━━━━━━━━━━\n"
-                "**📌 Bot qabul qiladigan shablon:**\n```\n"
-                "Savol matni\n=====\nVariant 1\n=====\n#To'g'ri javob\n=====\nVariant 3\n=====\nVariant 4\n+++++\n```\n\n"
+                "**📌 Fayl formatlari:** DOCX, PDF, TXT\n\n"
+                "**Shablon 1:**\n```\n1.Savol\na.Variant\n#b.To'g'ri\nc.Variant\n```\n\n"
+                "**Shablon 2:**\n```\nSavol\na.Variant\n#b.To'g'ri\nc.Variant\n```\n\n"
+                "**Shablon 3:**\n```\nSavol\n=====\n#To'g'ri\nVariant\n+++++\n```\n\n"
                 "**# belgisi** = to'g'ri javob",
-                buttons=main_menu(adm, uid)
+                buttons=main_menu(adm)
             )
             return
 
@@ -4430,11 +3776,13 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         if text == "📂 Fayldan quiz yaratish":
             user_states[uid] = UserState(step="wait_file")
             await event.respond(
-                file_quiz_guide_text(),
+                "📂 **Fayldan quiz yaratish**\n\n"
+                "DOCX, PDF yoki TXT fayl yuboring\n\n"
+                "📌 **Narx:** Har 25 savolga 1 500 so'm\n"
+                "_(50 savol = 3 000, 100 savol = 6 000)_\n\n"
+                "❓ /yordam — fayl formati haqida",
                 buttons=[[Button.text("🔙 Bosh menyu")]]
-            )
-            await send_template_voice(uid)
-            return
+            ); return
 
         if text == "✏️ Matn kiritish":
             user_states[uid] = UserState(step="wait_text")
@@ -4592,14 +3940,13 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                     log.error(f"AI xato: {e}")
                     await event.respond(
                         f"❌ AI xato: {e}\n\nGROQ_API_KEY ni tekshiring!",
-                        buttons=main_menu(adm, uid)
+                        buttons=main_menu(adm)
                     )
                 return
 
         # ---- MATN HOLAT ----
         if state.step == "wait_text":
             qs = _parse_questions(text)
-            parse_errors = getattr(_parse_questions, "last_errors", [])
             if qs:
                 state.questions = qs
                 state.total_questions = len(qs)
@@ -4633,15 +3980,13 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                     bal_left = db_get_balance(uid)
                     state.step = "ask_fan_name"
                     user_states[uid] = state
-                    await cleanup_user_prompts(uid, event.chat_id)
-                    prompt_msg = await event.respond(
+                    await event.respond(
                         f"✅ **Xizmat haqqi to'landi!**\n\n"
                         f"📂 {q_count} ta savol\n"
                         f"💰 -{price:,} so'm | Qolgan balans: {bal_left:,} so'm\n\n"
                         f"📚 Fan nomini yozing:",
                         buttons=[[Button.text("🔙 Bosh menyu")]]
                     )
-                    remember_cleanup_msg(uid, prompt_msg)
                 else:
                     # Balans yetarli emas — to'liq ma'lumot + Click tugmasi
                     needed = price - bal_now
@@ -4714,12 +4059,9 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             state.step = "ask_split"
             user_states[uid] = state
             total = state.total_questions
-            await cleanup_user_prompts(uid, event.chat_id)
-            prompt_msg = await event.respond(
+            await event.respond(
                 f"📚 **{text}** | ❓ {total} savol\n\nHar variantda necha ta?",
-                buttons=variant_btns(total))
-            remember_cleanup_msg(uid, prompt_msg)
-            return
+                buttons=variant_btns(total)); return
 
         # ---- VARIANT SONI ----
         if state.step == "ask_split":
@@ -4729,12 +4071,9 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             nv = (total + pv - 1) // pv
             state.step = "ask_time"
             user_states[uid] = state
-            await cleanup_user_prompts(uid, event.chat_id)
-            prompt_msg = await event.respond(
+            await event.respond(
                 f"✅ **{nv} ta variant** × {pv} savol\n\n⏱ Vaqt:",
-                buttons=time_btns())
-            remember_cleanup_msg(uid, prompt_msg)
-            return
+                buttons=time_btns()); return
 
         # ---- VAQT ----
         if state.step == "ask_time":
@@ -4744,15 +4083,12 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             state.time_choice = tm[text]
             state.step = "ask_order"
             user_states[uid] = state
-            await cleanup_user_prompts(uid, event.chat_id)
-            prompt_msg = await event.respond("🔀 Tartib:", buttons=order_btns())
-            remember_cleanup_msg(uid, prompt_msg)
-            return
+            await event.respond("🔀 Tartib:", buttons=order_btns()); return
 
         # ---- TARTIB ----
         if state.step == "ask_order":
             if text == "📋 Ketma-ket":   state.order_choice = "order"
-            elif text == "🔀 Aralash":   state.order_choice = "order"  # MUHIM: QuizBot javoblarni almashtirib yubormasligi uchun majburan ketma-ket
+            elif text == "🔀 Aralash":   state.order_choice = "shuffle"
             else:
                 await event.respond("Tugmadan tanlang!", buttons=order_btns()); return
 
@@ -4776,16 +4112,17 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             free_acc = sum(1 for v in account_busy.values() if not v)
             wait_str = calc_wait(new_reqs)
 
-            await cleanup_user_prompts(uid, event.chat_id)
-            start_msg = await event.respond(
-                "✅ **Quiz yaratish boshlandi**\n\n"
-                "Iltimos, kutib turing. Quiz tayyorlanish jarayoni foiz bilan ko‘rsatib boriladi.\n"
-                "Tayyor bo‘lgach, havola avtomatik yuboriladi.",
-                buttons=main_menu(adm, uid)
+            await event.respond(
+                f"📋 **Xulosa:**\n\n"
+                f"📚 {state.fan_name}\n"
+                f"❓ {total} savol → {nv} ta variant × {pv}\n"
+                f"⏱ {tl.get(state.time_choice)} | "
+                f"🔀 {'Aralash' if state.order_choice=='shuffle' else 'Ketma-ket'}\n\n"
+                f"📍 Navbat: #{pos}\n"
+                f"🟢 Bo'sh: {free_acc}/{len(account_pool)}\n"
+                f"⏳ ~{wait_str}",
+                buttons=main_menu(adm)
             )
-            await send_progress_voice(uid)
-            # Bu xabar progress oynasi chiqqandan keyin chatda keraksiz qolmasin
-            asyncio.create_task(_delete_later(start_msg, 8))
             async with queue_lock:
                 for req in new_reqs:
                     request_queue.append(req)
@@ -4849,7 +4186,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             await event.respond("Tugmadan tanlang!", buttons=answer_btns(opts)); return
         state.questions.append({
             "q": state.__dict__.get('manual_q_text', ''),
-            "opts": opts, "ans": correct, "correct_text": opts[correct]
+            "opts": opts, "ans": correct
         })
         user_states[uid] = state
         await _ask_manual(event, uid, state)
@@ -5523,165 +4860,111 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
     #  PARSER (ichki)
     # ============================================================
     def _parse_questions(text: str) -> list:
-        """
-        Savollarni turli shablonlardan o'qiydi.
-        Qo'llab-quvvatlanadi:
-        1) Savol\n=====\n#To'g'ri\nVariant\n+++++
-        2) Savol\n=====\nVariant\n=====\n#To'g'ri\n=====\nVariant\n+++++
-        3) 1. Savol\na) Variant\n#b) To'g'ri\nc) Variant
-        4) Savol\nA. Variant\n#B. To'g'ri\nC. Variant
-        """
-        text = (text or "").replace("\ufeff", "").replace("\xa0", " ").strip()
-        errors = []
-        _parse_questions.last_errors = []
-
-        def clean_line(s: str) -> str:
-            s = (s or "").replace("\t", " ").strip()
-            s = re.sub(r"\s+", " ", s)
-            return s
+        text = (text or "").replace("\ufeff", "").strip()
 
         def is_separator(s: str) -> bool:
-            return bool(re.match(r"^[=+\-_*]{3,}$", clean_line(s)))
+            """====, ++++, ----- kabi satrlar"""
+            return bool(re.match(r'^[=+\-_*]{3,}$', (s or '').strip()))
 
-        def is_block_end(s: str) -> bool:
-            return bool(re.match(r"^\+{3,}$", clean_line(s)))
+        def clean_line(s: str) -> str:
+            return (s or '').replace('\xa0', ' ').strip()
 
-        def strip_q_number(s: str) -> str:
-            return re.sub(r"^\s*(?:savol\s*)?\d+\s*[\.)\-:]\s*", "", s, flags=re.I).strip()
-
-        def strip_option_marker(s: str):
-            """(correct, option_text) qaytaradi"""
-            s = clean_line(s)
-            correct = False
-            # #A) javob, *A) javob, ✅ A) javob
-            if s.startswith(("#", "*")):
-                correct = True
-                s = s[1:].strip()
-            if s.startswith("✅"):
-                correct = True
-                s = s[1:].strip()
-
-            # A) / a. / 1) / 1. markerlarini olib tashlash
-            s = re.sub(r"^(?:variant\s*)?([a-hA-Hа-гА-Г]|\d{1,2})\s*[\.)\-:]\s*", "", s, flags=re.I).strip()
-            return correct, s
-
-        def add_question(qs: list, q_text: str, raw_options: list, block_no: int):
-            q_text = strip_q_number(clean_line(q_text))
-            options = []
-            correct_indexes = []
-
-            for raw in raw_options:
-                raw = clean_line(raw)
-                if not raw or is_separator(raw):
-                    continue
-                is_correct, opt = strip_option_marker(raw)
-                if not opt:
-                    continue
-                if is_correct:
-                    correct_indexes.append(len(options))
-                options.append(opt)
-
-            if not q_text:
-                errors.append(f"{block_no}-savolda savol matni yo'q.")
-                return
-            if len(options) < 2:
-                errors.append(f"{block_no}-savol: kamida 2 ta variant bo'lishi kerak.")
-                return
-            if not correct_indexes:
-                errors.append(f"{block_no}-savol: to'g'ri javob oldiga # belgisi qo'yilmagan.")
-                return
-            if len(correct_indexes) > 1:
-                errors.append(f"{block_no}-savol: faqat 1 ta to'g'ri javob bo'lishi kerak, lekin {len(correct_indexes)} ta # bor.")
-                return
-            if len(options) > 10:
-                errors.append(f"{block_no}-savol: variantlar 10 tadan oshmasin.")
-                return
-
-            qs.append({"q": q_text, "opts": options, "ans": correct_indexes[0], "correct_text": options[correct_indexes[0]]})
-
-        qs = []
-
-        # 1-usul: +++++ bilan ajratilgan bloklar. ===== variantlar orasida bo'lsa ham ishlaydi.
-        if re.search(r"\+{3,}", text) or re.search(r"={3,}", text):
-            blocks = re.split(r"^\s*\+{3,}\s*$", text, flags=re.M)
-            block_no = 0
-            for block in blocks:
+        if re.search(r'={4,}', text) and re.search(r'\+{4,}', text):
+            qs = []
+            for block in re.split(r'\+{4,}', text):
                 block = block.strip()
                 if not block:
                     continue
-                block_no += 1
 
-                if re.search(r"^\s*={3,}\s*$", block, flags=re.M):
-                    parts = [x.strip() for x in re.split(r"^\s*={3,}\s*$", block, flags=re.M) if x.strip()]
-                    if len(parts) < 2:
-                        errors.append(f"{block_no}-blok: ===== dan keyin variantlar topilmadi.")
-                        continue
-                    q_text = parts[0]
-                    raw_options = []
-                    for part in parts[1:]:
-                        raw_options.extend([clean_line(x) for x in part.splitlines() if clean_line(x)])
-                    add_question(qs, q_text, raw_options, block_no)
-                else:
-                    # Blok ichida ===== bo'lmasa: birinchi qator savol, qolganlari variant
-                    lines = [clean_line(x) for x in block.splitlines() if clean_line(x) and not is_block_end(x)]
-                    if len(lines) >= 3:
-                        add_question(qs, lines[0], lines[1:], block_no)
+                parts = re.split(r'={4,}', block, maxsplit=1)
+                if len(parts) < 2:
+                    continue
+
+                q_text = clean_line(parts[0])
+                opts_raw = [
+                    clean_line(l) for l in parts[1].splitlines()
+                    if clean_line(l) and not is_separator(clean_line(l))
+                ]
+
+                if not q_text or not opts_raw:
+                    continue
+
+                options = []
+                correct = 0
+                for idx, opt in enumerate(opts_raw):
+                    if opt.startswith('#'):
+                        correct = idx
+                        options.append(opt[1:].strip())
+                    else:
+                        options.append(opt)
+
+                if len(options) >= 2:
+                    qs.append({"q": q_text, "opts": options, "ans": correct})
 
             if qs:
-                _parse_questions.last_errors = errors[:10]
                 return qs
 
-        # 2-usul: raqamlangan yoki oddiy matn formatlari
+        qs = []
         lines = [clean_line(l) for l in text.splitlines()]
         i = 0
-        block_no = 0
         while i < len(lines):
             line = lines[i]
-            if not line or is_separator(line):
+            if not line:
                 i += 1
                 continue
 
-            # Savol boshi: 1. / 1) bilan yoki oldingi savol tugagandan keyingi oddiy qator
-            q_text = strip_q_number(line)
-            options = []
-            i += 1
+            if is_separator(line):
+                i += 1
+                continue
 
-            while i < len(lines):
-                vline = lines[i]
-                if not vline:
+            is_q = bool(re.match(r'^\d+[\.\)]\s*.+', line)) or \
+                   not re.match(r'^[a-zA-Z#][\.\)]\s*', line)
+            if is_q:
+                q_text = re.sub(r'^\d+[\.\)]\s*', '', line).strip()
+                if not q_text:
                     i += 1
-                    if options:
+                    continue
+
+                options, correct, opt_idx = [], 0, 0
+                i += 1
+                while i < len(lines):
+                    vline = lines[i]
+                    if not vline:
+                        i += 1
                         break
-                    continue
-                if is_separator(vline):
-                    i += 1
-                    continue
 
-                # Yangi raqamlangan savol boshlandi
-                if options and re.match(r"^\s*(?:savol\s*)?\d+\s*[\.)\-:]\s*.+", vline, flags=re.I):
-                    break
+                    if is_separator(vline):
+                        i += 1
+                        continue
 
-                # Variant bo'lishi mumkin: # bilan, A), a., 1) kabi marker bilan
-                if re.match(r"^\s*[#*✅]?\s*(?:variant\s*)?([a-hA-Hа-гА-Г]|\d{1,2})\s*[\.)\-:]\s*.+", vline, flags=re.I) or vline.strip().startswith(("#", "*", "✅")):
-                    options.append(vline)
-                    i += 1
-                    continue
+                    if re.match(r'^\d+[\.\)]\s*.+', vline) and options:
+                        break
 
-                # Marker bo'lmagan yangi qator va variantlar yig'ilgan bo'lsa — yangi savol deb qabul qilamiz
-                if options:
-                    break
+                    m = re.match(r'^(#?)([a-zA-Z]?)[\.\)]\s*(.*)', vline)
+                    if m:
+                        is_correct = bool(m.group(1))
+                        opt_text = m.group(3).strip()
+                        if opt_text and not is_separator(opt_text):
+                            if is_correct:
+                                correct = opt_idx
+                            options.append(opt_text)
+                            opt_idx += 1
+                        i += 1
+                    elif vline.startswith("#"):
+                        clean = re.sub(r'^#[a-dA-D]?[\.\)]\s*', '', vline[1:]).strip() or vline[1:].strip()
+                        if clean and not is_separator(clean):
+                            correct = opt_idx
+                            options.append(clean)
+                            opt_idx += 1
+                        i += 1
+                    else:
+                        i += 1
 
-                # Aks holda savol matni bir nechta qatordan iborat bo'lishi mumkin
-                q_text += " " + vline
+                if q_text and len(options) >= 2:
+                    qs.append({"q": q_text, "opts": options, "ans": correct})
+            else:
                 i += 1
 
-            if q_text and options:
-                block_no += 1
-                add_question(qs, q_text, options, block_no)
-            else:
-                i += 0
-
-        _parse_questions.last_errors = errors[:10]
         return qs
 
     # ============================================================
@@ -6311,72 +5594,19 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
 
     async def _send_preview(userbot, req: QuizRequest, uid: int, chat_id: int,
                             q_count: int, price: int, bal: int, blocks: int):
-        """5 ta random savoldan namuna quiz yaratadi va foydalanuvchiga kutish foizini ko'rsatadi."""
-
-        def _bar(percent: int) -> str:
-            filled = max(0, min(10, percent // 10))
-            return "█" * filled + "░" * (10 - filled)
-
-        async def _safe_edit(message, text: str):
-            try:
-                await message.edit(text)
-            except Exception as edit_err:
-                log.warning(f"Progress edit xato: {edit_err}")
-
-        progress_msg = None
-        make_task = None
         try:
-            await cleanup_user_prompts(uid, chat_id)
-            progress_msg = await bot_client.send_message(
+            await bot_client.send_message(
                 chat_id,
-                "🔄 **Namuna quiz tayyorlanmoqda...**\n\n"
-                "▰ **0%**\n"
-                "░░░░░░░░░░\n\n"
-                "⏳ Iltimos, botdan chiqib ketmang. Bu jarayon odatda 20–60 soniya davom etadi."
+                f"\U0001F50D **Namuna (5 ta random savol)**\n"
+                f"Savollaringiz to'g'ri o'qildimi? Ko'rib chiqing \U0001F447"
             )
-            await send_progress_voice(chat_id)
-
-            make_task = asyncio.create_task(make_quiz(userbot, req))
-
-            steps = [
-                (10, "📥 Savollar qabul qilindi"),
-                (25, "🔎 5 ta random savol tekshirilmoqda"),
-                (40, "🤖 @QuizBot bilan bog‘lanmoqda"),
-                (55, "📝 Savollar quizga kiritilmoqda"),
-                (70, "⚙️ Variantlar sozlanmoqda"),
-                (85, "🔗 Quiz havolasi olinmoqda"),
-                (95, "✅ Yakunlanmoqda"),
-            ]
-
-            step_index = 0
-            while not make_task.done():
-                percent, status = steps[min(step_index, len(steps) - 1)]
-                await _safe_edit(
-                    progress_msg,
-                    f"🔄 **Namuna quiz tayyorlanmoqda...**\n\n"
-                    f"▰ **{percent}%**\n"
-                    f"{_bar(percent)}\n\n"
-                    f"{status}\n\n"
-                    f"⏳ Iltimos, botdan chiqib ketmang. Tayyor bo‘lgach havola avtomatik yuboriladi."
-                )
-                step_index += 1
-                await asyncio.sleep(4)
-
-            url = await make_task
-
+            url = await make_quiz(userbot, req)
             if url:
-                await _safe_edit(
-                    progress_msg,
-                    "✅ **Namuna quiz tayyor!**\n\n"
-                    "▰ **100%**\n"
-                    "██████████\n\n"
-                    "Quyidagi havola orqali sinab ko‘ring 👇"
-                )
-                ready_msg = await bot_client.send_message(
+                await bot_client.send_message(
                     chat_id,
-                    f"✅ **Namuna tayyor!**\n\n"
-                    f"▶️ Quizni sinab ko'ring: {url}\n\n"
-                    f"Maqul bo'lsa — to'lov qilib, butun to'plamni oling 👇",
+                    f"\u2705 **Namuna tayyor!**\n\n"
+                    f"\u25b6\ufe0f Quizni sinab ko'ring: {url}\n\n"
+                    f"Maqul bo'lsa \u2014 to'lov qilib, butun to'plamni oling \U0001F447",
                     buttons=[
                         [Button.text("✅ Maqul, davom etamiz")],
                         [Button.text("❌ Bekor qilish")],
@@ -6388,22 +5618,11 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                     state.__dict__["_price"]  = price
                     state.__dict__["_bal"]    = bal
                     state.__dict__["_blocks"] = blocks
-                    ids = state.__dict__.get("_cleanup_msg_ids", [])
-                    for m in (progress_msg, ready_msg):
-                        if m and m.id not in ids:
-                            ids.append(m.id)
-                    state.__dict__["_cleanup_msg_ids"] = ids[-10:]
                     user_states[uid] = state
             else:
-                if progress_msg:
-                    await _safe_edit(progress_msg, "⚠️ Namuna yaratishda muammo bo‘ldi. Narx ma’lumoti yuborilmoqda...")
                 await _show_file_price(chat_id, uid, q_count, price, bal, blocks)
         except Exception as e:
             log.error(f"_send_preview xato: {e}")
-            if make_task and not make_task.done():
-                make_task.cancel()
-            if progress_msg:
-                await _safe_edit(progress_msg, "⚠️ Namuna yaratishda xatolik bo‘ldi. Narx ma’lumoti yuborilmoqda...")
             await _show_file_price(chat_id, uid, q_count, price, bal, blocks)
         finally:
             release(userbot)
