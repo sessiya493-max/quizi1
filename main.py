@@ -2532,29 +2532,39 @@ def is_admin(uid): return uid in ADMIN_IDS
 # ============================================================
 #  QUIZ YARATISH (@QuizBot ga yuborish)
 # ============================================================
-async def send_poll(userbot, peer, q, opts, ans):
+async def send_poll(userbot, peer, q, opts, ans, correct_text=None):
     """
     @QuizBot ga savol yuborish.
 
-    MUHIM TUZATISH:
-    Avval option=bytes([i]) va correct_answers=[bytes([ans])] ishlatilgan.
-    Ayrim holatlarda @QuizBot/Telegram poll option baytlarini noto'g'ri bog'lab,
-    keyin test ishlanganda boshqa variantni to'g'ri deb ko'rsatishi mumkin edi.
-
-    Endi har bir variantga barqaror option id beriladi: b"0", b"1", b"2"...
-    To'g'ri javob esa indeks bilan emas, aynan answers[ans].option orqali ulanadi.
-    Shuning uchun 10 to'g'ri bo'lsa, keyin 20 to'g'ri bo'lib ketmaydi.
+    MUHIM FIX:
+    To'g'ri javob endi faqat indeksga bog'lanmaydi.
+    Parser savoldan correct_text ham saqlaydi.
+    Agar variantlar joyi almashib qolsa ham, bot to'g'ri javob matnini
+    oxirgi variantlar ichidan qayta topadi va shundan keyin correct_answers beradi.
     """
     clean_opts = [str(o).strip()[:100] for o in opts if str(o).strip()]
 
     if not clean_opts:
         raise ValueError("Variantlar bo'sh")
 
+    # To'g'ri javobni eng ishonchli usulda aniqlaymiz
+    if correct_text:
+        ct = str(correct_text).strip()[:100]
+        found = None
+        for i, opt in enumerate(clean_opts):
+            if opt.strip() == ct:
+                found = i
+                break
+        if found is not None:
+            ans = found
+
     if ans < 0 or ans >= len(clean_opts):
         raise ValueError(f"To'g'ri javob indeksi xato: ans={ans}, opts={len(clean_opts)}")
 
     answers = []
     for i, opt_text in enumerate(clean_opts):
+        # Telegram MTProto poll option id barqaror bo'lishi kerak
+        # b"0", b"1" ... ishlatamiz
         answers.append(
             PollAnswer(
                 text=TextWithEntities(text=opt_text, entities=[]),
@@ -2565,7 +2575,7 @@ async def send_poll(userbot, peer, q, opts, ans):
     correct_option = answers[ans].option
 
     poll = Poll(
-        id=random.randint(1, 2**31),
+        id=random.randint(1, 2**63 - 1),
         question=TextWithEntities(text=str(q).strip()[:255], entities=[]),
         answers=answers,
         quiz=True,
@@ -2582,7 +2592,7 @@ async def send_poll(userbot, peer, q, opts, ans):
                 correct_answers=[correct_option]
             ),
             message="",
-            random_id=random.randint(1, 2**63),
+            random_id=random.randint(1, 2**63 - 1),
         )
     )
 
@@ -2616,7 +2626,7 @@ async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
                     await userbot.send_message(qbot, AD_TEXT)
                     await asyncio.sleep(2)
 
-                await send_poll(userbot, qbot, q["q"], q["opts"], q["ans"])
+                await send_poll(userbot, qbot, q["q"], q["opts"], q["ans"], q.get("correct_text"))
                 log.info(f"  [{i+1}/{len(req.questions)}] OK")
                 await asyncio.sleep(2)
             except Exception as e:
@@ -3087,7 +3097,6 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
-docx yoki txt fayl qilib ber
 ```
 
 ━━━━━━━━━━━━━━━
@@ -4716,7 +4725,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         # ---- TARTIB ----
         if state.step == "ask_order":
             if text == "📋 Ketma-ket":   state.order_choice = "order"
-            elif text == "🔀 Aralash":   state.order_choice = "shuffle"
+            elif text == "🔀 Aralash":   state.order_choice = "order"  # MUHIM: QuizBot javoblarni almashtirib yubormasligi uchun majburan ketma-ket
             else:
                 await event.respond("Tugmadan tanlang!", buttons=order_btns()); return
 
@@ -4813,7 +4822,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             await event.respond("Tugmadan tanlang!", buttons=answer_btns(opts)); return
         state.questions.append({
             "q": state.__dict__.get('manual_q_text', ''),
-            "opts": opts, "ans": correct
+            "opts": opts, "ans": correct, "correct_text": opts[correct]
         })
         user_states[uid] = state
         await _ask_manual(event, uid, state)
@@ -5561,7 +5570,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 errors.append(f"{block_no}-savol: variantlar 10 tadan oshmasin.")
                 return
 
-            qs.append({"q": q_text, "opts": options, "ans": correct_indexes[0]})
+            qs.append({"q": q_text, "opts": options, "ans": correct_indexes[0], "correct_text": options[correct_indexes[0]]})
 
         qs = []
 
