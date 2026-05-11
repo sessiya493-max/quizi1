@@ -2508,7 +2508,8 @@ async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
                     await userbot.send_message(qbot, AD_TEXT)
                     await asyncio.sleep(2)
 
-                await send_poll(userbot, qbot, q["q"], q["opts"], q["ans"])
+                ans_idx = stable_answer_index(q)
+                await send_poll(userbot, qbot, q["q"], q["opts"], ans_idx)
                 log.info(f"  [{i+1}/{len(req.questions)}] OK")
                 await asyncio.sleep(2)
             except Exception as e:
@@ -2541,7 +2542,9 @@ async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
             clicked = False
             for row in msg.reply_markup.rows:
                 for btn in row.buttons:
-                    if req.order_choice.lower() in btn.text.lower():
+                    # Javoblar har safar o'zgarib ketmasligi uchun QuizBot tartibini majburan ketma-ket qilamiz.
+                    target_order = "order"
+                    if target_order in btn.text.lower() or "ketma" in btn.text.lower():
                         await msg.click(text=btn.text); clicked = True; break
                 if clicked: break
             if not clicked:
@@ -2680,6 +2683,25 @@ def progress_text(percent: int, done: int, total: int, remain_seconds: int) -> s
         f"🕐 Taxminiy qolgan vaqt: **~{format_wait(max(remain_seconds, 0))}**\n\n"
         "💡 Botdan chiqib ketmang. Tayyor bo'lgach quiz link avtomatik yuboriladi."
     )
+
+
+
+def _norm_answer_text(x: str) -> str:
+    return re.sub(r"\s+", " ", str(x or "")).strip().lower()
+
+def stable_answer_index(q: dict) -> int:
+    """To'g'ri javobni matn bo'yicha qayta topadi. Variantlar joyi almashsa ham xato ketmaydi."""
+    opts = q.get("opts") or []
+    ans = int(q.get("ans", 0) or 0)
+    correct_text = q.get("correct_text")
+    if correct_text:
+        target = _norm_answer_text(correct_text)
+        for i, opt in enumerate(opts):
+            if _norm_answer_text(opt) == target:
+                return i
+    if 0 <= ans < len(opts):
+        return ans
+    return 0
 
 # ============================================================
 #  NAVBAT ISHLOVCHISI
@@ -4325,12 +4347,15 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             state.time_choice = tm[text]
             state.step = "ask_order"
             user_states[uid] = state
-            await event.respond("🔀 Tartib:", buttons=order_btns()); return
+            m = await event.respond("🔀 Tartib:", buttons=order_btns())
+            remember_cleanup(uid, getattr(event, 'id', None), getattr(m, 'id', None))
+            return
 
         # ---- TARTIB ----
         if state.step == "ask_order":
-            if text == "📋 Ketma-ket":   state.order_choice = "order"
-            elif text == "🔀 Aralash":   state.order_choice = "shuffle"
+            if text in ("📋 Ketma-ket", "🔀 Aralash"):
+                # To'g'ri javoblar har safar o'zgarib ketmasligi uchun QuizBotda ketma-ket tartib ishlatiladi.
+                state.order_choice = "order"
             else:
                 await event.respond("Tugmadan tanlang!", buttons=order_btns()); return
 
@@ -5133,15 +5158,21 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
 
                 options = []
                 correct = 0
+                correct_text = None
                 for idx, opt in enumerate(opts_raw):
                     if opt.startswith('#'):
-                        correct = idx
-                        options.append(opt[1:].strip())
+                        clean_opt = opt[1:].strip()
+                        correct = len(options)
+                        correct_text = clean_opt
+                        options.append(clean_opt)
                     else:
                         options.append(opt)
 
+                if correct_text is None and options:
+                    correct_text = options[correct]
+
                 if len(options) >= 2:
-                    qs.append({"q": q_text, "opts": options, "ans": correct})
+                    qs.append({"q": q_text, "opts": options, "ans": correct, "correct_text": correct_text})
 
             if qs:
                 return qs
@@ -5167,7 +5198,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                     i += 1
                     continue
 
-                options, correct, opt_idx = [], 0, 0
+                options, correct, correct_text, opt_idx = [], 0, None, 0
                 i += 1
                 while i < len(lines):
                     vline = lines[i]
@@ -5189,6 +5220,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                         if opt_text and not is_separator(opt_text):
                             if is_correct:
                                 correct = opt_idx
+                                correct_text = opt_text
                             options.append(opt_text)
                             opt_idx += 1
                         i += 1
@@ -5196,14 +5228,17 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                         clean = re.sub(r'^#[a-dA-D]?[\.\)]\s*', '', vline[1:]).strip() or vline[1:].strip()
                         if clean and not is_separator(clean):
                             correct = opt_idx
+                            correct_text = clean
                             options.append(clean)
                             opt_idx += 1
                         i += 1
                     else:
                         i += 1
 
+                if correct_text is None and options:
+                    correct_text = options[correct]
                 if q_text and len(options) >= 2:
-                    qs.append({"q": q_text, "opts": options, "ans": correct})
+                    qs.append({"q": q_text, "opts": options, "ans": correct, "correct_text": correct_text})
             else:
                 i += 1
 
