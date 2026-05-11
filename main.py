@@ -2776,8 +2776,10 @@ async def main():
     # ============================================================
     #  KNOPKALAR
     # ============================================================
-    def main_menu(adm=False, uid=None):
-        is_partner = db_is_partner(uid) if uid else False
+    def main_menu(adm=False, uid=None, force_partner: bool = False):
+        # MUHIM: menu har safar DB dagi real hamkor statusiga qarab qayta yaratiladi.
+        # force_partner=True admin tasdiqlagan zahoti userga yangi menu yuborish uchun.
+        is_partner_now = bool(force_partner or (db_is_partner(uid) if uid else False))
         btns = [
             [Button.text("🤖 AI test tuzish",       resize=True)],
             [Button.text("📂 Fayldan quiz yaratish", resize=True),
@@ -2788,12 +2790,30 @@ async def main():
             [Button.text("🎁 Referal",               resize=True),
              Button.text("❓ Yordam",                resize=True)],
         ]
-        if is_partner:
+        if is_partner_now:
             btns.append([Button.text("🤝 Hamkor paneli", resize=True)])
         else:
             btns.append([Button.text("🤝 Hamkor bo'lish", resize=True)])
-        if adm: btns.append([Button.text("🔧 Admin panel", resize=True)])
+        if adm:
+            btns.append([Button.text("🔧 Admin panel", resize=True)])
         return btns
+
+    async def force_refresh_main_menu(user_id: int, text: str = "🏠 Menu yangilandi"):
+        # Telegram reply keyboard ba'zan cache bo'lib qoladi.
+        # Shuning uchun avval eski keyboardni butunlay olib tashlaymiz, keyin yangisini yuboramiz.
+        try:
+            await bot_client.send_message(user_id, "🔄 Menu yangilanmoqda...", buttons=Button.clear())
+            await asyncio.sleep(0.35)
+        except Exception as e:
+            log.warning(f"Menu clear xato: {e}")
+        try:
+            await bot_client.send_message(
+                user_id,
+                text,
+                buttons=main_menu(is_admin(user_id), user_id, force_partner=db_is_partner(user_id))
+            )
+        except Exception as e:
+            log.warning(f"Menu refresh xato: {e}")
 
     def ai_settings_btns(state: UserState):
         topic_show = state.topic if state.topic else "Barcha mavzu"
@@ -2844,49 +2864,28 @@ async def main():
 
     @bot_client.on(events.NewMessage(pattern=r"/addpartner(?:\s+(\d+))?"))
     async def cmd_addpartner(event):
-        """Admin userni hamkor sifatida tasdiqlaydi va user menyusini majburan yangilaydi."""
         if event.sender_id not in ADMIN_IDS:
             return
-
         match = re.match(r'/addpartner\s+(\d+)', event.raw_text.strip())
         if not match:
             await event.respond("❌ Ishlatish: `/addpartner USER_ID`")
             return
-
         target_uid = int(match.group(1))
-
-        # 1) Hamkorni DB ga yozamiz
         db_add_partner(target_uid)
-
-        # 2) Shu userning pending arizalarini approved qilamiz
-        try:
-            con = get_db()
-            con.execute(
-                "UPDATE partner_applications SET status='approved' WHERE user_id=? AND status='pending'",
-                (target_uid,)
-            )
-            con.commit()
-            con.close()
-        except Exception as e:
-            log.warning(f"partner_applications status update xato: {e}")
-
         await event.respond(f"✅ `{target_uid}` hamkor sifatida qo'shildi!")
-
-        # 3) Userga eski keyboardni yopadigan xabar yuboramiz
-        # Telethon Button.clear() hamma versiyada bor; yo'q bo'lsa xato qilmay o'tamiz.
-        try:
-            await bot_client.send_message(
-                target_uid,
-                "🔄 Menyu yangilanmoqda...",
-                buttons=Button.clear()
-            )
-        except Exception:
-            pass
-
-        # 4) Userga yangi menu yuboramiz: Hamkor bo'lish o'rniga Hamkor paneli chiqadi
         try:
             bot_me3 = await bot_client.get_me()
             plink = f"https://t.me/{bot_me3.username}?start=ref_{target_uid}"
+
+            # 1) Eski keyboardni majburan olib tashlaymiz
+            await bot_client.send_message(
+                target_uid,
+                "🔄 Menu yangilanmoqda...",
+                buttons=Button.clear()
+            )
+            await asyncio.sleep(0.35)
+
+            # 2) Yangi keyboardni majburan yuboramiz: Hamkor bo'lish -> Hamkor paneli
             await bot_client.send_message(
                 target_uid,
                 f"🎉 **Tabriklaymiz! Siz hamkor bo'ldingiz!**\n\n"
@@ -2894,21 +2893,18 @@ async def main():
                 f"📢 Bu havolani kanal, guruh va ijtimoiy tarmoqlarda ulashing!\n\n"
                 f"💰 Har jalb: +{PARTNER_JOIN_BONUS} so'm\n"
                 f"💳 Har to'lovdan: {PARTNER_PAY_PERCENT}%\n\n"
-                f"Endi pastdagi **🤝 Hamkor paneli** tugmasi orqali balans va referallarni ko'rishingiz mumkin 👇",
-                buttons=main_menu(is_admin(target_uid), target_uid)
+                f"✅ Pastdagi menyuda endi **Hamkor paneli** tugmasi chiqadi 👇",
+                buttons=main_menu(is_admin(target_uid), target_uid, force_partner=True)
             )
         except Exception as e:
             await event.respond(f"⚠️ Foydalanuvchiga xabar yuborilmadi: {e}")
 
-
-    @bot_client.on(events.NewMessage(pattern=r"/(fixmenu|menu)$"))
+    @bot_client.on(events.NewMessage(pattern=r"/fixmenu"))
     async def cmd_fixmenu(event):
-        """Foydalanuvchiga statusiga mos menyuni qayta yuboradi."""
         uid = event.sender_id
-        await event.respond(
-            "🏠 Menyu yangilandi",
-            buttons=main_menu(is_admin(uid), uid)
-        )
+        await event.respond("🔄 Menu yangilanmoqda...", buttons=Button.clear())
+        await asyncio.sleep(0.35)
+        await event.respond("🏠 Bosh menu", buttons=main_menu(is_admin(uid), uid, force_partner=db_is_partner(uid)))
 
     async def user_is_subscribed(user_id: int) -> bool:
         settings = db_get_subscription_settings()
@@ -3595,7 +3591,9 @@ async def main():
         # ---- HAMKOR BO'LISH ----
         if text == "🤝 Hamkor bo'lish":
             if db_is_partner(uid):
-                await event.respond("✅ Siz allaqachon hamkorsiz!", buttons=main_menu(adm, uid))
+                await event.respond("✅ Siz allaqachon hamkorsiz! Menu yangilanmoqda...", buttons=Button.clear())
+                await asyncio.sleep(0.35)
+                await event.respond("🤝 Hamkor paneli menyuga qo'shildi 👇", buttons=main_menu(adm, uid, force_partner=True))
                 return
             await event.respond(
                 "🤝 **HAMKORLIK DASTURI**\n\n"
@@ -3621,7 +3619,9 @@ async def main():
 
         if text == "📝 Ariza qoldirish":
             if db_is_partner(uid):
-                await event.respond("✅ Siz allaqachon hamkorsiz!", buttons=main_menu(adm, uid))
+                await event.respond("✅ Siz allaqachon hamkorsiz! Menu yangilanmoqda...", buttons=Button.clear())
+                await asyncio.sleep(0.35)
+                await event.respond("🤝 Hamkor paneli menyuga qo'shildi 👇", buttons=main_menu(adm, uid, force_partner=True))
                 return
             if db_has_pending_application(uid):
                 await event.respond(
