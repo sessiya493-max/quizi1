@@ -2497,7 +2497,7 @@ async def send_poll(userbot, peer, qdata):
     answers = [
         PollAnswer(
             text=TextWithEntities(text=o, entities=[]),
-            option=str(i).encode()
+            option=bytes([i])
         )
         for i, o in enumerate(opts)
     ]
@@ -2516,7 +2516,7 @@ async def send_poll(userbot, peer, qdata):
         peer=peer,
         media=InputMediaPoll(
             poll=poll,
-            correct_answers=[str(correct_index).encode()]
+            correct_answers=[bytes([correct_index])]
         ),
         message="",
         random_id=random.randint(1, 2**63),
@@ -2578,56 +2578,54 @@ async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
                 await msg.click(text=msg.reply_markup.rows[0].buttons[0].text)
         await asyncio.sleep(4)
 
-        # Tartib — DOIM KETMA-KET.
-        # MUHIM: @QuizBot aralash/random tartibda ba'zan to'g'ri javoblarni chalkashtirib yuboradi.
-        # Shu sabab bu joyda random/shuffle/aralash tugmasini hech qachon bosmaymiz.
+        # Tartib — ARALASHTIRISHNI BUTUNLAY O'CHIRAMIZ.
+        # @QuizBot aralash rejimda ba'zan to'g'ri javob indeksini chalkashtiradi.
+        # Shuning uchun "Shuffle All" HECH QACHON bosilmaydi.
         msgs = await userbot.get_messages(qbot, limit=8)
         msg = next((m for m in msgs if m.reply_markup), None)
         if msg:
-            preferred_words = (
-                "ketma", "ketma-ket", "tartib",
-                "in order", "ordered", "sequential", "sequence", "normal order",
-                "don't shuffle", "do not shuffle", "no shuffle", "without shuffle",
-                "по поряд", "поряд", "послед", "без перем", "не перем",
-            )
-            bad_words = (
-                "aralash", "random", "shuffle", "mix", "mixed",
-                "перемеш", "случайн", "рандом",
-            )
-
+            clicked = False
             all_buttons = []
             for row in msg.reply_markup.rows:
                 for btn in row.buttons:
-                    btxt = (btn.text or "").strip()
-                    all_buttons.append((btn, btxt, btxt.lower()))
+                    all_buttons.append(btn)
 
-            chosen_text = None
+            def norm_btn(t: str) -> str:
+                return (t or "").lower().replace("’", "'").replace("‘", "'").strip()
 
-            # 1) Aniq ketma-ket tugmani qidiramiz
-            for btn, btxt, low in all_buttons:
-                if any(w in low for w in preferred_words) and not any(w in low for w in bad_words):
-                    chosen_text = btxt
+            # 1) Eng ishonchli: aralashtirmaslikni bildiradigan tugmalar
+            no_shuffle_patterns = (
+                "don't shuffle", "dont shuffle", "do not shuffle",
+                "no shuffle", "without shuffle", "keep current order",
+                "current order", "in order", "ordered", "not shuffle",
+                "ketma", "ketma-ket", "aralashtirma", "aralashtirmas",
+                "не перемеш", "не смеш", "без перемеш", "по поряд"
+            )
+            for btn in all_buttons:
+                btxt = norm_btn(getattr(btn, "text", ""))
+                if any(p in btxt for p in no_shuffle_patterns):
+                    await msg.click(text=btn.text)
+                    clicked = True
+                    log.info(f"@QuizBot tartib tanlandi: {btn.text}")
                     break
 
-            # 2) Agar 2 ta tugma bo'lsa va bittasi random/aralash bo'lsa, ikkinchisini tanlaymiz
-            if not chosen_text and len(all_buttons) == 2:
-                safe = [(btn, btxt, low) for btn, btxt, low in all_buttons if not any(w in low for w in bad_words)]
-                if len(safe) == 1:
-                    chosen_text = safe[0][1]
-
-            # 3) Hech bo'lmasa random/aralash bo'lmagan birinchi tugmani bosamiz
-            if not chosen_text:
-                for btn, btxt, low in all_buttons:
-                    if not any(w in low for w in bad_words):
-                        chosen_text = btxt
+            # 2) Ba'zi interfeyslarda javob "No" bo'ladi
+            if not clicked:
+                for btn in all_buttons:
+                    btxt = norm_btn(getattr(btn, "text", ""))
+                    if btxt in ("no", "yo'q", "yoq", "нет", "❌ no", "❌ yo'q", "❌ нет"):
+                        await msg.click(text=btn.text)
+                        clicked = True
+                        log.info(f"@QuizBot tartib tanlandi: {btn.text}")
                         break
 
-            if chosen_text:
-                await msg.click(text=chosen_text)
-                log.info(f"Quiz tartibi tanlandi: {chosen_text}")
-            else:
-                # Xavfsizlik uchun random tugmasini bosmaymiz. Agar tanlay olmasak, /done dan keyin default qoladi.
-                log.warning("Quiz tartibi tugmasi topilmadi yoki faqat random tugmalar chiqdi; bosilmadi")
+            # 3) Agar topilmasa, "Shuffle All" bo'lmagan oxirgi tugmani bosamiz.
+            # @QuizBot odatda aralashtirmaslik tugmasini oxiriga qo'yadi.
+            if not clicked and all_buttons:
+                safe_buttons = [b for b in all_buttons if "shuffle all" not in norm_btn(getattr(b, "text", "")) and "aralash" not in norm_btn(getattr(b, "text", ""))]
+                target_btn = safe_buttons[-1] if safe_buttons else all_buttons[-1]
+                await msg.click(text=target_btn.text)
+                log.info(f"@QuizBot tartib fallback tanlandi: {target_btn.text}")
         await asyncio.sleep(6)
 
         # Havola olish — faqat yangi xabarlardan (start_msg_id dan keyin)
@@ -3672,18 +3670,15 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 # ── Preview jarayoni: foydalanuvchi kutib qolmasligi uchun foizli progress ──
                 await msg.edit(
                     f"📂 **Fayl tekshirilmoqda...**\n\n"
-                    f"📊 Jarayon: **15%**\n"
-                    f"🟦🟦⬜⬜⬜⬜⬜⬜⬜⬜\n\n"
-                    f"💡 Botdan chiqib ketmang. Savollar tekshirilmoqda."
+                    f"▰▰▱▱▱▱▱▱▱▱ 20%\n"
+                    f"Topildi: **{q_count} ta savol**"
                 )
 
                 await asyncio.sleep(0.4)
                 await msg.edit(
                     f"📄 **Savollar ajratilmoqda...**\n\n"
-                    f"📊 Jarayon: **35%**\n"
-                    f"🟦🟦🟦🟦⬜⬜⬜⬜⬜⬜\n\n"
-                    f"✅ Topildi: **{q_count} ta savol**\n"
-                    f"🧠 Namuna quiz ketma-ket tartibda tayyorlanadi."
+                    f"▰▰▰▰▱▱▱▱▱▱ 40%\n"
+                    f"Namuna quiz tayyorlanadi."
                 )
 
                 preview_count = min(5, q_count)
