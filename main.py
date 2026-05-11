@@ -1999,7 +1999,7 @@ def db_already_referred(inviter_id: int, invited_id: int) -> bool:
 # ============================================================
 PARTNER_JOIN_BONUS  = 50     # har bir jalb qilgan foydalanuvchi uchun (so'm)
 PARTNER_PAY_PERCENT = 20     # to'lovdan foiz (%)
-PARTNER_MIN_WITHDRAW = 15000 # minimal chiqarish (so'm)
+PARTNER_MIN_WITHDRAW = 5000  # minimal chiqarish (so'm)
 
 def db_init_partner_tables(con):
     """Hamkorlik jadvallarini yaratish (db_init ichida chaqiriladi)"""
@@ -2093,29 +2093,100 @@ def db_partner_add_ref(partner_id: int):
     con.commit()
     con.close()
 
-def db_partner_withdraw(partner_id: int, amount: int, card_num: str) -> bool:
+def db_create_partner_withdrawal(partner_id: int, amount: int, card_num: str) -> Optional[int]:
+    """Pul yechish so'rovini yaratadi. Muhim: balansdan darhol ayrilmaydi."""
     con = get_db()
     row = con.execute("SELECT partner_balance FROM partners WHERE user_id=?", (partner_id,)).fetchone()
-    if not row or row[0] < amount:
+    if not row or row[0] < amount or amount < PARTNER_MIN_WITHDRAW:
         con.close()
-        return False
-    con.execute("UPDATE partners SET partner_balance = partner_balance - ? WHERE user_id=?", (amount, partner_id))
-    con.execute(
+        return None
+    cur = con.execute(
         "INSERT INTO partner_withdrawals (partner_id, amount, card_num, status, created_at) VALUES (?, ?, ?, 'pending', datetime('now'))",
         (partner_id, amount, card_num)
     )
+    wid = cur.lastrowid
     con.commit()
     con.close()
-    return True
+    return wid
 
-def db_save_partner_application(user_id: int, username: str, full_name: str, comment: str):
+def db_get_partner_withdrawal(withdraw_id: int):
     con = get_db()
-    con.execute("""
+    row = con.execute(
+        "SELECT id, partner_id, amount, card_num, status, created_at FROM partner_withdrawals WHERE id=?",
+        (withdraw_id,)
+    ).fetchone()
+    con.close()
+    return row
+
+def db_approve_partner_withdrawal(withdraw_id: int) -> tuple[bool, str, Optional[int], int]:
+    """Admin pul o'tkazganidan keyin tasdiqlaydi va shunda balansdan yechiladi."""
+    con = get_db()
+    row = con.execute(
+        "SELECT partner_id, amount, status FROM partner_withdrawals WHERE id=?",
+        (withdraw_id,)
+    ).fetchone()
+    if not row:
+        con.close()
+        return False, "So'rov topilmadi", None, 0
+    partner_id, amount, status = row
+    if status != 'pending':
+        con.close()
+        return False, "Bu so'rov allaqachon ko'rib chiqilgan", partner_id, amount
+    bal_row = con.execute("SELECT partner_balance FROM partners WHERE user_id=?", (partner_id,)).fetchone()
+    balance = bal_row[0] if bal_row else 0
+    if balance < amount:
+        con.close()
+        return False, f"Hamkor balansida mablag' yetarli emas. Balans: {balance:,} so'm", partner_id, amount
+    con.execute("UPDATE partners SET partner_balance = partner_balance - ? WHERE user_id=?", (amount, partner_id))
+    con.execute("UPDATE partner_withdrawals SET status='paid' WHERE id=?", (withdraw_id,))
+    con.execute(
+        "INSERT INTO partner_log (partner_id, amount, reason, created_at) VALUES (?, ?, ?, datetime('now'))",
+        (partner_id, -amount, f"Yechib olish tasdiqlandi #{withdraw_id}")
+    )
+    con.commit()
+    con.close()
+    return True, "OK", partner_id, amount
+
+def db_reject_partner_withdrawal(withdraw_id: int) -> tuple[bool, Optional[int], int]:
+    con = get_db()
+    row = con.execute(
+        "SELECT partner_id, amount, status FROM partner_withdrawals WHERE id=?",
+        (withdraw_id,)
+    ).fetchone()
+    if not row or row[2] != 'pending':
+        con.close()
+        return False, None, 0
+    partner_id, amount, _ = row
+    con.execute("UPDATE partner_withdrawals SET status='rejected' WHERE id=?", (withdraw_id,))
+    con.commit()
+    con.close()
+    return True, partner_id, amount
+
+def db_save_partner_application(user_id: int, username: str, full_name: str, comment: str) -> int:
+    con = get_db()
+    cur = con.execute("""
         INSERT INTO partner_applications (user_id, username, full_name, comment, status, created_at)
         VALUES (?, ?, ?, ?, 'pending', datetime('now'))
     """, (user_id, username, full_name, comment))
+    app_id = cur.lastrowid
     con.commit()
     con.close()
+    return app_id
+
+def db_update_partner_application_status(app_id: int, status: str):
+    con = get_db()
+    con.execute("UPDATE partner_applications SET status=? WHERE id=?", (status, app_id))
+    con.commit()
+    con.close()
+
+def db_get_partner_application(app_id: int):
+    con = get_db()
+    row = con.execute(
+        "SELECT id, user_id, username, full_name, comment, status, created_at FROM partner_applications WHERE id=?",
+        (app_id,)
+    ).fetchone()
+    con.close()
+    return row
 
 def db_has_pending_application(user_id: int) -> bool:
     con = get_db()
@@ -2462,21 +2533,58 @@ def is_admin(uid): return uid in ADMIN_IDS
 #  QUIZ YARATISH (@QuizBot ga yuborish)
 # ============================================================
 async def send_poll(userbot, peer, q, opts, ans):
-    answers = [PollAnswer(
-        text=TextWithEntities(text=o[:100], entities=[]),
-        option=bytes([i])
-    ) for i, o in enumerate(opts)]
+    """
+    @QuizBot ga savol yuborish.
+
+    MUHIM TUZATISH:
+    Avval option=bytes([i]) va correct_answers=[bytes([ans])] ishlatilgan.
+    Ayrim holatlarda @QuizBot/Telegram poll option baytlarini noto'g'ri bog'lab,
+    keyin test ishlanganda boshqa variantni to'g'ri deb ko'rsatishi mumkin edi.
+
+    Endi har bir variantga barqaror option id beriladi: b"0", b"1", b"2"...
+    To'g'ri javob esa indeks bilan emas, aynan answers[ans].option orqali ulanadi.
+    Shuning uchun 10 to'g'ri bo'lsa, keyin 20 to'g'ri bo'lib ketmaydi.
+    """
+    clean_opts = [str(o).strip()[:100] for o in opts if str(o).strip()]
+
+    if not clean_opts:
+        raise ValueError("Variantlar bo'sh")
+
+    if ans < 0 or ans >= len(clean_opts):
+        raise ValueError(f"To'g'ri javob indeksi xato: ans={ans}, opts={len(clean_opts)}")
+
+    answers = []
+    for i, opt_text in enumerate(clean_opts):
+        answers.append(
+            PollAnswer(
+                text=TextWithEntities(text=opt_text, entities=[]),
+                option=str(i).encode("utf-8")
+            )
+        )
+
+    correct_option = answers[ans].option
+
     poll = Poll(
         id=random.randint(1, 2**31),
-        question=TextWithEntities(text=q[:255], entities=[]),
-        answers=answers, quiz=True,
-        public_voters=False, multiple_choice=False, closed=False,
+        question=TextWithEntities(text=str(q).strip()[:255], entities=[]),
+        answers=answers,
+        quiz=True,
+        public_voters=False,
+        multiple_choice=False,
+        closed=False,
     )
-    await userbot(SendMediaRequest(
-        peer=peer,
-        media=InputMediaPoll(poll=poll, correct_answers=[bytes([ans])]),
-        message="", random_id=random.randint(1, 2**63),
-    ))
+
+    await userbot(
+        SendMediaRequest(
+            peer=peer,
+            media=InputMediaPoll(
+                poll=poll,
+                correct_answers=[correct_option]
+            ),
+            message="",
+            random_id=random.randint(1, 2**63),
+        )
+    )
 
 async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
     try:
@@ -2894,11 +3002,12 @@ async def main():
     #  KNOPKALAR
     # ============================================================
     def main_menu(adm=False, uid=None):
+        partner_btn = "🤝 Hamkor paneli" if (uid and db_is_partner(uid)) else "🤝 Hamkor bo'lish"
         btns = [
             [Button.text("📂 Fayldan quiz yaratish", resize=True),
              Button.text("📋 Mening quizlarim",      resize=True)],
             [Button.text("❓ Yordam",                resize=True),
-             Button.text("🤝 Hamkor bo'lish",        resize=True)],
+             Button.text(partner_btn,                resize=True)],
             [Button.text("👤 Profil",                resize=True)],
         ]
         if adm:
@@ -2956,7 +3065,7 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
-docx, pdf yoki txt fayl qilib tayyorlab ber
+docx,pdf yoki txt fayl qilib ber
 ```
 
 ━━━━━━━━━━━━━━━
@@ -3104,6 +3213,162 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
     #  HANDLERLAR
     # ============================================================
 
+
+    @bot_client.on(events.CallbackQuery(pattern=b"partner_approve:"))
+    async def on_partner_approve(event):
+        if event.sender_id not in ADMIN_IDS:
+            await event.answer("Siz admin emassiz", alert=True)
+            return
+        try:
+            _, app_id_s, uid_s = event.data.decode().split(":")
+            app_id = int(app_id_s)
+            target_uid = int(uid_s)
+        except Exception:
+            await event.answer("Noto'g'ri callback", alert=True)
+            return
+        app = db_get_partner_application(app_id)
+        if app and app[5] != 'pending':
+            await event.answer("Bu ariza allaqachon ko'rib chiqilgan", alert=True)
+            return
+        db_add_partner(target_uid)
+        db_update_partner_application_status(app_id, 'approved')
+        bot_me3 = await bot_client.get_me()
+        plink = f"https://t.me/{bot_me3.username}?start=ref_{target_uid}"
+        try:
+            await bot_client.send_message(
+                target_uid,
+                f"🎉 **Tabriklaymiz! Hamkorlik arizangiz tasdiqlandi!**\n\n"
+                f"Endi asosiy menyuda **🤝 Hamkor paneli** tugmasi chiqadi.\n\n"
+                f"🔗 Sizning shaxsiy havolangiz:\n`{plink}`\n\n"
+                f"💰 Har yangi foydalanuvchi uchun: **+{PARTNER_JOIN_BONUS:,} so'm**\n"
+                f"💳 To'lovlardan ulush: **{PARTNER_PAY_PERCENT}%**",
+                buttons=main_menu(is_admin(target_uid), target_uid),
+                link_preview=False
+            )
+        except Exception as e:
+            log.warning(f"Hamkorga tasdiq xabari yuborilmadi: {e}")
+        try:
+            await event.edit("✅ Hamkorlik arizasi tasdiqlandi. Foydalanuvchiga xabar yuborildi.")
+        except Exception:
+            pass
+        await event.answer("Tasdiqlandi")
+
+    @bot_client.on(events.CallbackQuery(pattern=b"partner_reject:"))
+    async def on_partner_reject(event):
+        if event.sender_id not in ADMIN_IDS:
+            await event.answer("Siz admin emassiz", alert=True)
+            return
+        try:
+            _, app_id_s, uid_s = event.data.decode().split(":")
+            app_id = int(app_id_s)
+            target_uid = int(uid_s)
+        except Exception:
+            await event.answer("Noto'g'ri callback", alert=True)
+            return
+        db_update_partner_application_status(app_id, 'rejected')
+        try:
+            await bot_client.send_message(
+                target_uid,
+                "❌ Hamkorlik arizangiz hozircha tasdiqlanmadi.\n\nKeyinroq qayta ariza qoldirishingiz mumkin.",
+                buttons=main_menu(is_admin(target_uid), target_uid)
+            )
+        except Exception:
+            pass
+        try:
+            await event.edit("❌ Hamkorlik arizasi rad etildi.")
+        except Exception:
+            pass
+        await event.answer("Rad etildi")
+
+    @bot_client.on(events.CallbackQuery(data=b"partner_withdraw_start"))
+    async def on_partner_withdraw_start(event):
+        uid = event.sender_id
+        if not db_is_partner(uid):
+            await event.answer("Siz hamkor emassiz", alert=True)
+            return
+        pinfo = db_get_partner_info(uid)
+        pbal = pinfo[1] if pinfo else 0
+        if pbal < PARTNER_MIN_WITHDRAW:
+            await event.answer(f"Minimal {PARTNER_MIN_WITHDRAW:,} so'm", alert=True)
+            return
+        user_states[uid] = UserState(step="wait_partner_card")
+        await event.respond(
+            f"💸 **Pulni yechib olish**\n\n"
+            f"💰 Yechib olish summasi: **{pbal:,} so'm**\n\n"
+            f"Karta raqamingizni yuboring:\n"
+            f"_(16 raqam, masalan: 8600 1234 5678 9012)_",
+            buttons=[[Button.text("🔙 Bosh menyu")]]
+        )
+        await event.answer()
+
+    @bot_client.on(events.CallbackQuery(pattern=b"withdraw_approve:"))
+    async def on_withdraw_approve(event):
+        if event.sender_id not in ADMIN_IDS:
+            await event.answer("Siz admin emassiz", alert=True)
+            return
+        try:
+            withdraw_id = int(event.data.decode().split(":", 1)[1])
+        except Exception:
+            await event.answer("Noto'g'ri callback", alert=True)
+            return
+        row = db_get_partner_withdrawal(withdraw_id)
+        ok, msg, partner_id, amount = db_approve_partner_withdrawal(withdraw_id)
+        if not ok:
+            await event.answer(msg, alert=True)
+            return
+        try:
+            await bot_client.send_message(
+                partner_id,
+                f"✅ **Pul kartangizga o'tkazildi!**\n\n"
+                f"💰 Summa: **{amount:,} so'm**\n"
+                f"🧾 So'rov ID: `{withdraw_id}`\n\n"
+                f"Hamkor balansingizdan shu summa yechildi.",
+                buttons=main_menu(is_admin(partner_id), partner_id)
+            )
+        except Exception:
+            pass
+        try:
+            card = row[3] if row else ''
+            await event.edit(
+                f"✅ Pul o'tkazish tasdiqlandi.\n\n"
+                f"👤 Hamkor ID: `{partner_id}`\n"
+                f"💰 Summa: **{amount:,} so'm**\n"
+                f"💳 Karta: `{card}`"
+            )
+        except Exception:
+            pass
+        await event.answer("Tasdiqlandi")
+
+    @bot_client.on(events.CallbackQuery(pattern=b"withdraw_reject:"))
+    async def on_withdraw_reject(event):
+        if event.sender_id not in ADMIN_IDS:
+            await event.answer("Siz admin emassiz", alert=True)
+            return
+        try:
+            withdraw_id = int(event.data.decode().split(":", 1)[1])
+        except Exception:
+            await event.answer("Noto'g'ri callback", alert=True)
+            return
+        ok, partner_id, amount = db_reject_partner_withdrawal(withdraw_id)
+        if not ok:
+            await event.answer("So'rov topilmadi yoki allaqachon ko'rib chiqilgan", alert=True)
+            return
+        try:
+            await bot_client.send_message(
+                partner_id,
+                f"❌ **Pul yechish arizangiz rad etildi.**\n\n"
+                f"💰 Summa: **{amount:,} so'm**\n"
+                f"Balansingizdan pul yechilmadi.",
+                buttons=main_menu(is_admin(partner_id), partner_id)
+            )
+        except Exception:
+            pass
+        try:
+            await event.edit("❌ Pul yechish arizasi rad etildi. Balansdan pul yechilmadi.")
+        except Exception:
+            pass
+        await event.answer("Rad etildi")
+
     @bot_client.on(events.NewMessage(pattern=r"/addpartner(?:\s+(\d+))?"))
     async def cmd_addpartner(event):
         if event.sender_id not in ADMIN_IDS:
@@ -3173,6 +3438,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             bonus_msg += f"\n\n🎁 **Referal bonusi: +{REFERRAL_BONUS:,} so'm** balansga qo'shildi!"
             if db_is_partner(inviter_id):
                 db_add_partner_balance(inviter_id, PARTNER_JOIN_BONUS, f"Yangi foydalanuvchi: {uid}")
+                db_partner_add_ref(inviter_id)
                 db_partner_add_ref(inviter_id)
             try:
                 await bot_client.send_message(
@@ -3848,7 +4114,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 "  2. Admin tasdiqlaydi\n"
                 "  3. Maxsus havola olasiz\n"
                 "  4. Havolani ijtimoiy tarmoqlarda ulashing\n"
-                "  5. Balansni kartaga chiqaring (min 15 000 so'm)\n\n"
+                "  5. Balansni kartaga chiqaring (min 5 000 so'm)\n\n"
                 "━━━━━━━━━━━━━━━━━━━\n"
                 "📌 Ariza qoldirishni xohlaysizmi?",
                 buttons=[
@@ -3884,17 +4150,27 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             ln = getattr(sender2, 'last_name', '') or ''
             un = getattr(sender2, 'username', '') or ''
             fn2 = f"{fn} {ln}".strip() or un or str(uid)
-            db_save_partner_application(uid, un, fn2, comment)
+            app_id = db_save_partner_application(uid, un, fn2, comment)
             user_states[uid] = UserState()
             # Adminga xabar
             uname_str = f"@{un}" if un else f"ID: {uid}"
-            await notify_admin(
-                f"🤝 **Yangi hamkorlik arizasi**\n\n"
-                f"👤 {fn2} ({uname_str})\n"
-                f"🆔 `{uid}`\n\n"
-                f"💬 Ariza matni:\n{comment}\n\n"
-                f"✅ Tasdiqlash uchun: `/addpartner {uid}`"
-            )
+            for aid in ADMIN_IDS:
+                try:
+                    await bot_client.send_message(
+                        aid,
+                        f"🤝 **Yangi hamkorlik arizasi**\n\n"
+                        f"👤 {fn2} ({uname_str})\n"
+                        f"🆔 `{uid}`\n"
+                        f"📝 Ariza ID: `{app_id}`\n\n"
+                        f"💬 Ariza matni:\n{comment}\n\n"
+                        f"Tasdiqlasangiz, foydalanuvchida **🤝 Hamkor bo'lish** tugmasi **🤝 Hamkor paneli**ga almashadi.",
+                        buttons=[
+                            [Button.inline("✅ Tasdiqlash", data=f"partner_approve:{app_id}:{uid}".encode())],
+                            [Button.inline("❌ Rad etish", data=f"partner_reject:{app_id}:{uid}".encode())],
+                        ]
+                    )
+                except Exception as e:
+                    log.warning(f"Hamkor arizasini adminga yuborib bo'lmadi {aid}: {e}")
             await event.respond(
                 "✅ **Arizangiz qabul qilindi!**\n\n"
                 "Admin tez orada ko'rib chiqadi va javob beradi.\n"
@@ -3920,15 +4196,59 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"💰 **Hamkor balansi:** {pbal:,} so'm\n"
                 f"📈 **Jami daromad:** {total_earned:,} so'm\n"
-                f"👥 **Jalb qilganlar:** {total_refs} ta\n"
+                f"👥 **Taklif qilganlar:** {total_refs} ta\n"
                 f"━━━━━━━━━━━━━━━━━━━\n\n"
-                f"🔗 **Sizning havolangiz:**\n`{plink}`\n\n"
-                f"📢 Bu havolani kanal, guruh yoki ijtimoiy tarmoqlarda ulashing!\n\n"
-                f"💸 Minimal chiqarish: {PARTNER_MIN_WITHDRAW:,} so'm",
+                f"Quyidagi bo'limlardan birini tanlang 👇",
                 buttons=[
-                    [Button.text("💸 Pul chiqarish")],
+                    [Button.text("💰 Hamkor balans"), Button.text("🔗 Hamkorlik referali")],
                     [Button.text("🔙 Bosh menyu")],
                 ]
+            )
+            return
+
+        if text == "💰 Hamkor balans":
+            if not db_is_partner(uid):
+                await event.respond("⛔ Siz hamkor emassiz!", buttons=main_menu(adm, uid))
+                return
+            pinfo = db_get_partner_info(uid)
+            _, pbal, total_earned, total_refs = pinfo if pinfo else (uid, 0, 0, 0)
+            text_bal = (
+                f"💰 **HAMKOR BALANSI**\n\n"
+                f"👥 Taklif qilgan odamlaringiz: **{total_refs} ta**\n"
+                f"💵 Hozirgi balans: **{pbal:,} so'm**\n"
+                f"📈 Jami ishlab topilgan: **{total_earned:,} so'm**\n"
+                f"📌 Minimal yechib olish: **{PARTNER_MIN_WITHDRAW:,} so'm**\n\n"
+            )
+            if pbal >= PARTNER_MIN_WITHDRAW:
+                text_bal += "✅ Balansingiz yetarli. Pulni kartaga yechib olishingiz mumkin."
+                buttons_bal = [[Button.inline("💸 Pulni yechib olish", data=b"partner_withdraw_start")], [Button.text("🤝 Hamkor paneli")]]
+            else:
+                text_bal += (
+                    "❌ Hali yechib ololmaysiz.\n"
+                    f"Yechib olish uchun kamida **{PARTNER_MIN_WITHDRAW:,} so'm** bo'lishi kerak.\n"
+                    "Ko'proq foydalanuvchi taklif qiling."
+                )
+                buttons_bal = [[Button.text("🤝 Hamkor paneli")], [Button.text("🔙 Bosh menyu")]]
+            await event.respond(text_bal, buttons=buttons_bal)
+            return
+
+        if text == "🔗 Hamkorlik referali":
+            if not db_is_partner(uid):
+                await event.respond("⛔ Siz hamkor emassiz!", buttons=main_menu(adm, uid))
+                return
+            pinfo = db_get_partner_info(uid)
+            _, pbal, total_earned, total_refs = pinfo if pinfo else (uid, 0, 0, 0)
+            bot_me2 = await bot_client.get_me()
+            plink = f"https://t.me/{bot_me2.username}?start=ref_{uid}"
+            await event.respond(
+                f"🔗 **HAMKORLIK REFERALI**\n\n"
+                f"Sizning maxsus havolangiz:\n`{plink}`\n\n"
+                f"👥 Taklif qilganlar: **{total_refs} ta**\n"
+                f"💰 Har yangi foydalanuvchi uchun: **+{PARTNER_JOIN_BONUS:,} so'm**\n"
+                f"💳 To'lovlardan ulush: **{PARTNER_PAY_PERCENT}%**\n\n"
+                f"Havolani kanal, guruh yoki ijtimoiy tarmoqlarda ulashing.",
+                buttons=[[Button.text("🤝 Hamkor paneli")], [Button.text("🔙 Bosh menyu")]],
+                link_preview=False
             )
             return
 
@@ -3968,27 +4288,43 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             pinfo = db_get_partner_info(uid)
             pbal = pinfo[1] if pinfo else 0
             formatted_card = ' '.join([card_input[i:i+4] for i in range(0, 16, 4)])
-            ok = db_partner_withdraw(uid, pbal, formatted_card)
+            withdraw_id = db_create_partner_withdrawal(uid, pbal, formatted_card)
             user_states[uid] = UserState()
-            if ok:
+            if withdraw_id:
                 sender3 = await event.get_sender()
                 un3 = getattr(sender3, 'username', '') or ''
                 ustr = f"@{un3}" if un3 else f"ID: {uid}"
-                await notify_admin(
-                    f"💸 **Hamkor chiqarish so'rovi**\n\n"
-                    f"👤 {ustr} (`{uid}`)\n"
+                for aid in ADMIN_IDS:
+                    try:
+                        await bot_client.send_message(
+                            aid,
+                            f"💸 **Hamkor pul yechish arizasi**\n\n"
+                            f"👤 {ustr} (`{uid}`)\n"
+                            f"🧾 So'rov ID: `{withdraw_id}`\n"
+                            f"💰 Summa: **{pbal:,} so'm**\n"
+                            f"💳 Karta: `{formatted_card}`\n\n"
+                            f"Avval pulni kartaga o'tkazing. Keyin **Tasdiqlash** tugmasini bosing.\n"
+                            f"Tasdiqlangandan keyingina balansdan {pbal:,} so'm yechiladi.",
+                            buttons=[
+                                [Button.inline("✅ Pul o'tkazildi, tasdiqlash", data=f"withdraw_approve:{withdraw_id}".encode())],
+                                [Button.inline("❌ Rad etish", data=f"withdraw_reject:{withdraw_id}".encode())],
+                            ]
+                        )
+                    except Exception as e:
+                        log.warning(f"Withdraw arizasini adminga yuborib bo'lmadi {aid}: {e}")
+                await event.respond(
+                    f"✅ **Pul yechish arizasi yuborildi!**\n\n"
                     f"💰 Summa: **{pbal:,} so'm**\n"
                     f"💳 Karta: `{formatted_card}`\n\n"
-                    f"Iltimos o'tkazing!"
-                )
-                await event.respond(
-                    f"✅ **So'rov yuborildi!**\n\n"
-                    f"💰 {pbal:,} so'm → `{formatted_card}`\n\n"
-                    f"Admin tez orada o'tkazadi.",
-                    buttons=[[Button.text("🔙 Bosh menyu")]]
+                    f"⏳ Admin kartangizga pul o'tkazgach, arizani tasdiqlaydi.\n"
+                    f"Shundan keyin balansingizdan summa yechiladi.",
+                    buttons=[[Button.text("🤝 Hamkor paneli")], [Button.text("🔙 Bosh menyu")]]
                 )
             else:
-                await event.respond("❌ Xato yuz berdi!", buttons=[[Button.text("🔙 Bosh menyu")]])
+                await event.respond(
+                    f"❌ So'rov yaratilmadi. Balansingiz kam bo'lishi yoki oldinroq o'zgargan bo'lishi mumkin.",
+                    buttons=[[Button.text("🤝 Hamkor paneli")], [Button.text("🔙 Bosh menyu")]]
+                )
             return
 
         if text == "❓ Yordam":
