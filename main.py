@@ -2777,25 +2777,30 @@ async def main():
     #  KNOPKALAR
     # ============================================================
     def main_menu(adm=False, uid=None, force_partner: bool = False):
-        # MUHIM: menu har safar DB dagi real hamkor statusiga qarab qayta yaratiladi.
+        # Ixcham asosiy menu.
+        # MUHIM: har safar DB dagi real hamkor statusiga qarab qayta yaratiladi.
         # force_partner=True admin tasdiqlagan zahoti userga yangi menu yuborish uchun.
         is_partner_now = bool(force_partner or (db_is_partner(uid) if uid else False))
+
+        partner_btn = "🤝 Hamkor paneli" if is_partner_now else "🤝 Hamkor bo'lish"
+
         btns = [
-            [Button.text("🤖 AI test tuzish",       resize=True)],
-            [Button.text("📂 Fayldan quiz yaratish", resize=True),
-             Button.text("✏️ Matn kiritish",         resize=True)],
-            [Button.text("📋 Mening quizlarim",      resize=True)],
-            [Button.text("💳 To'lov qilish",         resize=True),
-             Button.text("💰 Balansni ko'rish",      resize=True)],
-            [Button.text("🎁 Referal",               resize=True),
-             Button.text("❓ Yordam",                resize=True)],
+            [
+                Button.text("📂 Fayldan quiz yaratish", resize=True),
+                Button.text("📋 Mening quizlarim", resize=True),
+            ],
+            [
+                Button.text("❓ Yordam", resize=True),
+                Button.text(partner_btn, resize=True),
+            ],
+            [
+                Button.text("👤 Profil", resize=True),
+            ],
         ]
-        if is_partner_now:
-            btns.append([Button.text("🤝 Hamkor paneli", resize=True)])
-        else:
-            btns.append([Button.text("🤝 Hamkor bo'lish", resize=True)])
+
         if adm:
             btns.append([Button.text("🔧 Admin panel", resize=True)])
+
         return btns
 
     async def force_refresh_main_menu(user_id: int, text: str = "🏠 Menu yangilandi"):
