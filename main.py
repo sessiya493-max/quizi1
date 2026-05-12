@@ -2599,8 +2599,6 @@ async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
                 "no shuffle", "without shuffle", "keep current order",
                 "current order", "in order", "ordered", "not shuffle",
                 "ketma", "ketma-ket", "aralashtirma", "aralashtirmas",
-                "do not mix", "don’t mix", "dont mix", "without mixing",
-                "original order", "same order", "as is",
                 "не перемеш", "не смеш", "без перемеш", "по поряд"
             )
             for btn in all_buttons:
@@ -2621,24 +2619,13 @@ async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
                         log.info(f"@QuizBot tartib tanlandi: {btn.text}")
                         break
 
-            # 3) Agar topilmasa, aralashtirishga o'xshagan tugmalarni qat'iy chetlab o'tamiz.
-            # Muhim: "Shuffle All" / "Aralash" tugmalari HECH QACHON bosilmasin.
+            # 3) Agar topilmasa, "Shuffle All" bo'lmagan oxirgi tugmani bosamiz.
+            # @QuizBot odatda aralashtirmaslik tugmasini oxiriga qo'yadi.
             if not clicked and all_buttons:
-                bad_patterns = (
-                    "shuffle all", "shuffle", "mix", "mixed", "random",
-                    "aralash", "aralashtir", "перемеш", "смеш", "случайн"
-                )
-                safe_buttons = [
-                    b for b in all_buttons
-                    if not any(p in norm_btn(getattr(b, "text", "")) for p in bad_patterns)
-                ]
-                if safe_buttons:
-                    target_btn = safe_buttons[-1]
-                    await msg.click(text=target_btn.text)
-                    clicked = True
-                    log.info(f"@QuizBot ketma-ket fallback tanlandi: {target_btn.text}")
-                else:
-                    log.warning("@QuizBot tartib bosqichida xavfsiz ketma-ket tugma topilmadi; aralash tugma bosilmadi.")
+                safe_buttons = [b for b in all_buttons if "shuffle all" not in norm_btn(getattr(b, "text", "")) and "aralash" not in norm_btn(getattr(b, "text", ""))]
+                target_btn = safe_buttons[-1] if safe_buttons else all_buttons[-1]
+                await msg.click(text=target_btn.text)
+                log.info(f"@QuizBot tartib fallback tanlandi: {target_btn.text}")
         await asyncio.sleep(6)
 
         # Havola olish — faqat yangi xabarlardan (start_msg_id dan keyin)
@@ -3695,9 +3682,9 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 )
 
                 preview_count = min(5, q_count)
-                # Namuna ham endi ARALASH EMAS: fayldagi birinchi 5 ta savol aynan ketma-ket olinadi.
+                # Namuna uchun savollar random tanlanadi, LEKIN quiz ichidagi tartib va variantlar aralashtirilmaydi.
                 # @QuizBot aralash rejimda to'g'ri javobni chalkashtirishi mumkin, shuning uchun order_choice doim "order".
-                preview_qs = list(qs)[:preview_count]
+                preview_qs = random.sample(qs, preview_count) if q_count > preview_count else list(qs)
 
                 # Preview quizni yuboramiz (bepul, haqiqiy akkaunt bilan)
                 try:
@@ -4883,7 +4870,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 "ask_fan_name": "📚 Fan nomi kiritmoqda",
                 "ask_split": "🔢 Variant soni tanlayapti",
                 "ask_time": "⏱ Vaqt tanlayapti",
-                "ask_order": "📋 Ketma-ket tartib",
+                "ask_order": "🔀 Tartib tanlayapti",
                 "manual_start": "✋ Manual rejim boshladi",
                 "manual_detect": "✋ Manual savol ko'rib chiqmoqda",
                 "manual_answer": "✋ Javob ko'rsatmoqda",
@@ -5314,7 +5301,23 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                         options.append(opt)
 
                 if len(options) >= 2:
-                    qs.append({"q": q_text, "opts": options, "ans": correct, "correct_text": options[correct] if 0 <= correct < len(options) else options[0]})
+                    # Variantlarni aralashtiramiz, lekin savollar tartibi o'zgarmaydi.
+                    # To'g'ri javob indeksini qayta hisoblaymiz.
+                    paired = list(enumerate(options))
+                    random.shuffle(paired)
+
+                    shuffled_options = [opt for _, opt in paired]
+                    new_correct = next(
+                        idx for idx, (old_idx, _) in enumerate(paired)
+                        if old_idx == correct
+                    )
+
+                    qs.append({
+                        "q": q_text,
+                        "opts": shuffled_options,
+                        "ans": new_correct,
+                        "correct_text": shuffled_options[new_correct]
+                    })
 
             if qs:
                 return qs
