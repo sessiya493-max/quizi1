@@ -7,6 +7,7 @@ AI Quiz Bot
 """
 
 
+
 import asyncio
 import json
 import logging
@@ -1830,35 +1831,39 @@ def click_config_ok() -> bool:
     return bool(CLICK_SERVICE_ID and CLICK_MERCHANT_ID and CLICK_SECRET_KEY)
 
 def verify_click_signature(data: dict, action: int) -> bool:
-    """CLICK callback imzosini tekshiradi. transaction_param/merchant_trans_id farqini ham qo'llab-quvvatlaydi."""
+    """Click MD5 imzosini tekshiradi (sign_time bilan)."""
     import hashlib as _hl, hmac as _hmac
     try:
-        merchant_trans_id = get_click_merchant_trans_id(data)
-        click_trans_id = str(data.get("click_trans_id", ""))
-        service_id = str(CLICK_SERVICE_ID)
-        secret_key = str(CLICK_SECRET_KEY)
-        amount = str(data.get("amount", ""))
-        act = str(data.get("action", action))
-        sign_time = str(data.get("sign_time", ""))
-        merchant_prepare_id = str(data.get("merchant_prepare_id", ""))
-
-        if str(act) == "0" or action == 0:
-            raw = f"{click_trans_id}{service_id}{secret_key}{merchant_trans_id}{amount}{act}{sign_time}"
+        if action == 0:
+            raw = "{}{}{}{}{}{}{}".format(
+                data.get("click_trans_id", ""),
+                CLICK_SERVICE_ID,
+                CLICK_SECRET_KEY,
+                data.get("merchant_trans_id", ""),
+                data.get("amount", ""),
+                data.get("action", ""),
+                data.get("sign_time", ""),
+            )
         else:
-            raw = f"{click_trans_id}{service_id}{secret_key}{merchant_trans_id}{merchant_prepare_id}{amount}{act}{sign_time}"
-
+            raw = "{}{}{}{}{}{}{}{}".format(
+                data.get("click_trans_id", ""),
+                CLICK_SERVICE_ID,
+                CLICK_SECRET_KEY,
+                data.get("merchant_trans_id", ""),
+                data.get("merchant_prepare_id", ""),
+                data.get("amount", ""),
+                data.get("action", ""),
+                data.get("sign_time", ""),
+            )
         expected = _hl.md5(raw.encode("utf-8")).hexdigest()
-        received = str(data.get("sign_string", ""))
+        received = data.get("sign_string", "")
         ok = _hmac.compare_digest(expected, received)
         if not ok:
-            log.warning(
-                f"CLICK SIGN XATO | raw={raw} | exp={expected} | got={received} | data={data}"
-            )
+            log.warning(f"Click imzo XATO | exp={expected} | got={received}")
         return ok
     except Exception as e:
         log.error(f"Signature xato: {e}")
         return False
-
 
 def db_create_click_invoice(user_id: int, amount: int) -> str:
     import uuid, time
@@ -3135,7 +3140,6 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
-docx yoki txt fayl qilib ber
 ```
 
 ━━━━━━━━━━━━━━━
@@ -3862,6 +3866,8 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 f"Quyidagi tugma orqali CLICK bilan to'lov qiling 👇",
                 buttons=[
                     [Button.url(f"💳 CLICK orqali {needed:,} so'm to'lash", click_url)],
+                    [Button.text("💳 To'lov qilish", resize=True)],
+                    [Button.text("🔙 Bosh menyu", resize=True)],
                 ]
             )
         else:
@@ -6351,28 +6357,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             if not verify_click_signature(data, action=1):
                 return aio_web.json_response({"error": -1, "error_note": "SIGN CHECK FAILED"})
             if error < 0:
-                return aio_web.json_response({
-                    "click_trans_id": data.get("click_trans_id"),
-                    "merchant_trans_id": merchant_trans_id,
-                    "merchant_confirm_id": int(data.get("merchant_prepare_id", 0) or 0),
-                    "error": 0,
-                    "error_note": "Success"
-                })
-            invoice = db_get_click_invoice(merchant_trans_id)
-            if not invoice:
-                return aio_web.json_response({"error": -4, "error_note": "Invoice topilmadi"})
-            inv_id, inv_user_id, inv_amount, inv_status = invoice
-            if inv_status == "paid":
-                return aio_web.json_response({
-                    "click_trans_id": data.get("click_trans_id"),
-                    "merchant_trans_id": merchant_trans_id,
-                    "merchant_confirm_id": inv_id,
-                    "error": 0,
-                    "error_note": "Success"
-                })
-            cb_amount = float(data.get("amount", 0) or 0)
-            if abs(cb_amount - float(inv_amount)) > 1:
-                return aio_web.json_response({"error": -2, "error_note": "Summa mos kelmaydi"})
+                return aio_web.json_response({"error": 0, "error_note": "Success"})
             result = db_confirm_click_invoice(merchant_trans_id)
             if not result:
                 return aio_web.json_response({"error": -4, "error_note": "Invoice topilmadi"})
@@ -6472,25 +6457,21 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 f"💰 **{amount:,} so'm**\n"
                 f"🔖 `{merchant_trans_id}`"
             )
-            return aio_web.json_response({
-                "click_trans_id": data.get("click_trans_id"),
-                "merchant_trans_id": merchant_trans_id,
-                "merchant_confirm_id": inv_id if 'inv_id' in locals() else 0,
-                "error": 0,
-                "error_note": "Success"
-            })
+            return aio_web.json_response({"error": 0, "error_note": "Success"})
         except Exception as e:
             log.error(f"CLICK Complete xato: {e}")
             return aio_web.json_response({"error": -9, "error_note": str(e)})
 
-    async def click_health(request):
-        return aio_web.json_response({"status": "ok", "click": "ready"})
-
     app = aio_web.Application()
-    app.router.add_get("/click/prepare", click_health)
-    app.router.add_get("/click/complete", click_health)
     app.router.add_post("/click/prepare", click_prepare)
     app.router.add_post("/click/complete", click_complete)
+
+    # CLICK kabineti URL saqlashdan oldin manzilni tekshirishi mumkin.
+    # Asosiy to'lov callbacklari POST orqali ishlaydi, bu GET route'lar esa
+    # faqat URL validation uchun 200 OK qaytaradi.
+    app.router.add_get("/click/prepare", lambda r: aio_web.json_response({"status": "ok", "endpoint": "click_prepare"}))
+    app.router.add_get("/click/complete", lambda r: aio_web.json_response({"status": "ok", "endpoint": "click_complete"}))
+
     app.router.add_get("/", lambda r: aio_web.json_response({"status": "ok", "bot": "AI Quiz Bot"}))
     app.router.add_get("/health", lambda r: aio_web.json_response({"status": "ok"}))
     app.router.add_get("/privacy", lambda r: aio_web.Response(text=PRIVACY_HTML, content_type="text/html"))
