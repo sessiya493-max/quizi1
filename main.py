@@ -3064,36 +3064,6 @@ async def main():
             log.warning(f"Menu refresh xato: {e}")
 
 
-    def profile_buttons():
-        return [
-            [Button.text("💰 Balansni ko'rish", resize=True), Button.text("💳 To'lov qilish", resize=True)],
-            [Button.text("🎁 Referal", resize=True)],
-            [Button.text("🔙 Bosh menyu", resize=True)],
-        ]
-
-    async def show_user_profile(event, uid: int, adm: bool = False):
-        bal = db_get_balance(uid)
-        quiz_count = db_count_user_quizzes(uid)
-        ref_count = db_get_referral_count(uid)
-        partner_status = "✅ Ha" if db_is_partner(uid) else "❌ Yo'q"
-        sender_profile = await event.get_sender()
-        full_name = f"{getattr(sender_profile, 'first_name', '') or ''} {getattr(sender_profile, 'last_name', '') or ''}".strip() or str(uid)
-        username = getattr(sender_profile, 'username', None)
-        username_txt = f"@{username}" if username else "yo'q"
-        await event.respond(
-            f"👤 **Profil**\n\n"
-            f"Ism: **{full_name}**\n"
-            f"Username: **{username_txt}**\n"
-            f"ID: `{uid}`\n\n"
-            f"💼 Balans: **{bal:,} so'm**\n"
-            f"📋 Yaratilgan quizlar: **{quiz_count} ta**\n"
-            f"🎁 Referallar: **{ref_count} ta**\n"
-            f"🤝 Hamkor: **{partner_status}**\n\n"
-            f"Quyidagilardan birini tanlang 👇",
-            buttons=profile_buttons()
-        )
-
-
     # ============================================================
     #  FAYL SHABLONI BO'YICHA QO'LLANMA MATNLARI
     # ============================================================
@@ -3140,6 +3110,7 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
+docx yoki txt fayl yaratib ber
 ```
 
 ━━━━━━━━━━━━━━━
@@ -3549,22 +3520,6 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         else:
             await event.answer("Hali a'zo bo'lmagansiz yoki bot tekshira olmadi.", alert=True)
             await show_subscription_prompt(event, uid)
-
-    @bot_client.on(events.NewMessage(pattern=r"^(👤 Profil|Profil)$"))
-    async def cmd_profile_button(event):
-        uid = event.sender_id
-        adm = is_admin(uid)
-        if not is_admin(uid) and not db_is_agreed(uid):
-            await event.respond("⚠️ Avval /start bosib shartlarga rozilik bering.")
-            raise events.StopPropagation
-        if not is_admin(uid):
-            settings = db_get_subscription_settings()
-            if settings.get("enabled") and not await user_is_subscribed(uid):
-                await show_subscription_prompt(event, uid)
-                raise events.StopPropagation
-        user_states[uid] = UserState()
-        await show_user_profile(event, uid, adm)
-        raise events.StopPropagation
 
     @bot_client.on(events.NewMessage(func=lambda e: e.file))
     async def on_file(event):
@@ -4199,9 +4154,26 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 await event.respond("❌ Xato yuz berdi!", buttons=[[Button.text("🔙 Bosh menyu")]])
             return
 
-        if text in ("👤 Profil", "Profil"):
-            user_states[uid] = UserState()
-            await show_user_profile(event, uid, adm)
+        if text == "👤 Profil":
+            bal = db_get_balance(uid)
+            quiz_count = db_count_user_quizzes(uid)
+            ref_count = db_get_referral_count(uid)
+            partner_status = "✅ Ha" if db_is_partner(uid) else "❌ Yo'q"
+            sender_profile = await event.get_sender()
+            full_name = f"{getattr(sender_profile, 'first_name', '') or ''} {getattr(sender_profile, 'last_name', '') or ''}".strip() or str(uid)
+            username = getattr(sender_profile, 'username', None)
+            username_txt = f"@{username}" if username else "yo'q"
+            await event.respond(
+                f"👤 **Profil**\n\n"
+                f"Ism: **{full_name}**\n"
+                f"Username: **{username_txt}**\n"
+                f"ID: `{uid}`\n\n"
+                f"💼 Balans: **{bal:,} so'm**\n"
+                f"📋 Yaratilgan quizlar: **{quiz_count} ta**\n"
+                f"🎁 Referallar: **{ref_count} ta**\n"
+                f"🤝 Hamkor: **{partner_status}**",
+                buttons=main_menu(adm, uid)
+            )
             return
 
         if text == "❓ Yordam":
@@ -6341,7 +6313,36 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
     asyncio.create_task(expire_checker())
     asyncio.create_task(queue_worker())
     log.info(f"✅ AI Quiz Bot tayyor! {len(account_pool)} ta akkaunt.")
-    await bot_client.run_until_disconnected()
+    await 
+
+    @bot_client.on(events.NewMessage(pattern="👤 Profil"))
+    async def profile_handler(event):
+        uid = event.sender_id
+        balance = db_get_balance(uid)
+        quiz_count = db_count_user_quizzes(uid)
+        ref_count = db_get_referral_count(uid)
+        me = await event.get_sender()
+        fullname = f"{getattr(me, 'first_name', '') or ''} {getattr(me, 'last_name', '') or ''}".strip()
+        username = f"@{me.username}" if getattr(me, 'username', None) else "Mavjud emas"
+
+        txt = f"""👤 <b>Profil</b>
+
+🧑 Ism: {fullname}
+📌 Username: {username}
+🆔 ID: <code>{uid}</code>
+
+💰 Balans: <b>{balance:,} so'm</b>
+📂 Quizlar: {quiz_count} ta
+👥 Referallar: {ref_count} ta"""
+
+        buttons = [
+            [Button.inline("💳 To'lov qilish", b"profile_pay")],
+            [Button.inline("👥 Referal", b"profile_ref")],
+        ]
+
+        await event.respond(txt, parse_mode='html', buttons=buttons)
+
+bot_client.run_until_disconnected()
 
 
 if __name__ == "__main__":
