@@ -3110,7 +3110,6 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
-docx yoki txt fayl qilib ber
 ```
 
 ━━━━━━━━━━━━━━━
@@ -3770,6 +3769,125 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 await msg.edit(f"❌ Xato: {e}")
             except Exception:
                 await event.respond(f"❌ Xato: {e}", buttons=main_menu(adm, uid))
+
+
+    # ============================================================
+    #  PROFIL MENYUSI — ALOHIDA HANDLERLAR
+    #  Muhim: bu handlerlar umumiy on_msg dan OLDIN turadi.
+    #  Shunda user fayl/test/payment state ichida qolib ketgan bo'lsa ham
+    #  "👤 Profil", "💰 Balansni ko'rish", "💳 To'lov qilish", "🎁 Referal"
+    #  tugmalari doim ishlaydi.
+    # ============================================================
+
+    def profile_menu_buttons():
+        return [
+            [Button.text("💰 Balansni ko'rish", resize=True), Button.text("💳 To'lov qilish", resize=True)],
+            [Button.text("🎁 Referal", resize=True)],
+            [Button.text("🔙 Bosh menyu", resize=True)],
+        ]
+
+    @bot_client.on(events.NewMessage(func=lambda e: (not e.file) and ((e.raw_text or "").strip() == "👤 Profil")))
+    async def profile_button_handler(event):
+        uid = event.sender_id
+        bal = db_get_balance(uid)
+        quiz_count = db_count_user_quizzes(uid)
+        ref_count = db_get_referral_count(uid)
+        partner_status = "✅ Ha" if db_is_partner(uid) else "❌ Yo'q"
+        sender_profile = await event.get_sender()
+        full_name = f"{getattr(sender_profile, 'first_name', '') or ''} {getattr(sender_profile, 'last_name', '') or ''}".strip() or str(uid)
+        username = getattr(sender_profile, 'username', None)
+        username_txt = f"@{username}" if username else "yo'q"
+        await event.respond(
+            f"👤 **Profil**\n\n"
+            f"Ism: **{full_name}**\n"
+            f"Username: **{username_txt}**\n"
+            f"ID: `{uid}`\n\n"
+            f"💼 Balans: **{bal:,} so'm**\n"
+            f"📋 Yaratilgan quizlar: **{quiz_count} ta**\n"
+            f"🎁 Referallar: **{ref_count} ta**\n"
+            f"🤝 Hamkor: **{partner_status}**\n\n"
+            f"Quyidagi bo'limlardan birini tanlang 👇",
+            buttons=profile_menu_buttons()
+        )
+        raise events.StopPropagation
+
+    @bot_client.on(events.NewMessage(func=lambda e: (not e.file) and ((e.raw_text or "").strip() == "💰 Balansni ko'rish")))
+    async def profile_balance_button_handler(event):
+        uid = event.sender_id
+        bal = db_get_balance(uid)
+        tests = bal // AI_PRICE
+        if bal < AI_PRICE:
+            needed = AI_PRICE - bal
+            merchant_trans_id = db_create_click_invoice(uid, needed)
+            click_url = create_click_url(needed, merchant_trans_id)
+            await event.respond(
+                f"💰 **Balans: {bal:,} so'm**\n"
+                f"🤖 AI test uchun kerak: {AI_PRICE:,} so'm\n"
+                f"❌ Yetishmaydi: **{needed:,} so'm**\n\n"
+                f"Quyidagi tugma orqali CLICK bilan to'lov qiling 👇",
+                buttons=[
+                    [Button.url(f"💳 CLICK orqali {needed:,} so'm to'lash", click_url)],
+                    [Button.text("💳 To'lov qilish", resize=True)],
+                    [Button.text("🔙 Bosh menyu", resize=True)],
+                ]
+            )
+        else:
+            await event.respond(
+                f"💰 **Balans: {bal:,} so'm**\n"
+                f"🤖 Tuzish mumkin: **{tests} ta** AI test\n\n"
+                f"✅ Balans yetarli!",
+                buttons=[
+                    [Button.text("📂 Fayldan quiz yaratish", resize=True)],
+                    [Button.text("💳 To'lov qilish", resize=True)],
+                    [Button.text("🔙 Bosh menyu", resize=True)],
+                ]
+            )
+        raise events.StopPropagation
+
+    @bot_client.on(events.NewMessage(func=lambda e: (not e.file) and ((e.raw_text or "").strip() == "💳 To'lov qilish")))
+    async def profile_pay_button_handler(event):
+        uid = event.sender_id
+        bal = db_get_balance(uid)
+        user_states[uid] = UserState(step="wait_click_amount")
+        await event.respond(
+            f"💳 **CLICK orqali to'lov**\n\n"
+            f"💰 Hozirgi balans: **{bal:,} so'm**\n\n"
+            f"Qancha to'lamoqchisiz? Summani so'mda yozing.\n"
+            f"Masalan: `5000`",
+            buttons=[[Button.text("🔙 Bosh menyu", resize=True)]]
+        )
+        raise events.StopPropagation
+
+    @bot_client.on(events.NewMessage(func=lambda e: (not e.file) and ((e.raw_text or "").strip() == "🎁 Referal")))
+    async def profile_referral_button_handler(event):
+        uid = event.sender_id
+        ref_count = db_get_referral_count(uid)
+        ref_list = db_get_referral_list(uid, limit=10)
+        bot_me = await bot_client.get_me()
+        ref_link = f"https://t.me/{bot_me.username}?start=ref_{uid}"
+
+        lines = [
+            "🎁 **Referal dasturi**\n",
+            f"👥 Siz taklif qilganlar: **{ref_count} ta**",
+            f"💰 Har bir referal uchun: **{REFERRAL_BONUS:,} so'm**\n",
+            "🔗 **Sizning havolangiz:**",
+            f"`{ref_link}`\n",
+            "📌 Do'stingizga shu havolani yuboring. U ro'yxatdan o'tganda bonus beriladi!",
+        ]
+        if ref_list:
+            lines.append("\n👤 **So'nggi referallar:**")
+            for r in ref_list:
+                r_id, r_first, r_last, r_uname, r_date = r
+                r_name = f"{r_first or ''} {r_last or ''}".strip() or r_uname or str(r_id)
+                r_date_short = r_date[:10] if r_date else ""
+                lines.append(f"  • {r_name} — {r_date_short}")
+
+        await event.respond(
+            "\n".join(lines),
+            buttons=[[Button.text("🔙 Bosh menyu", resize=True)]],
+            link_preview=False
+        )
+        raise events.StopPropagation
 
     @bot_client.on(events.NewMessage(func=lambda e: not e.file and not e.text.startswith("/")))
     async def on_msg(event):
