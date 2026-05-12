@@ -3110,6 +3110,7 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
+docx yoki txt fayl qilib ber
 ```
 
 ━━━━━━━━━━━━━━━
@@ -4153,12 +4154,34 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 await event.respond("❌ Xato yuz berdi!", buttons=[[Button.text("🔙 Bosh menyu")]])
             return
 
+        if text == "👤 Profil":
+            bal = db_get_balance(uid)
+            quiz_count = db_count_user_quizzes(uid)
+            ref_count = db_get_referral_count(uid)
+            partner_status = "✅ Ha" if db_is_partner(uid) else "❌ Yo'q"
+            sender_profile = await event.get_sender()
+            full_name = f"{getattr(sender_profile, 'first_name', '') or ''} {getattr(sender_profile, 'last_name', '') or ''}".strip() or str(uid)
+            username = getattr(sender_profile, 'username', None)
+            username_txt = f"@{username}" if username else "yo'q"
+            await event.respond(
+                f"👤 **Profil**\n\n"
+                f"Ism: **{full_name}**\n"
+                f"Username: **{username_txt}**\n"
+                f"ID: `{uid}`\n\n"
+                f"💼 Balans: **{bal:,} so'm**\n"
+                f"📋 Yaratilgan quizlar: **{quiz_count} ta**\n"
+                f"🎁 Referallar: **{ref_count} ta**\n"
+                f"🤝 Hamkor: **{partner_status}**",
+                buttons=main_menu(adm, uid)
+            )
+            return
+
         if text == "❓ Yordam":
             await event.respond(
                 "📋 **YORDAM**\n\n"
                 "**🤖 AI test tuzish** — 2 000 so'm\n"
                 "Istalgan fan va mavzudan AI avtomatik test tuzadi\n\n"
-                "**📂 Fayldan quiz yaratish** — har 25 savolga 2 000 so'm\n"
+                "**📂 Fayldan quiz yaratish** — har 25 savolga 1 500 so'm\n"
                 "Tayyor testingizni yuklang, bot quizga aylantiradi\n\n"
                 "━━━━━━━━━━━━━━━\n"
                 "**📌 Fayl formatlari:** DOCX, PDF, TXT\n\n"
@@ -6063,20 +6086,45 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                     f"✅ **Namuna tayyor!**\n\n"
                     f"📊 Jarayon: **100%**\n"
                     f"🟦🟦🟦🟦🟦🟦🟦🟦🟦🟦\n\n"
-                    f"▶️ Quizni sinab ko'ring: {url}\n\n"
-                    f"Maqul bo'lsa — to'lov qilib, butun to'plamni oling 👇"
+                    f"▶️ Quizni sinab ko'ring: {url}"
                 )
+
+                needed = max(price - bal, 0)
+                pay_text = (
+                    f"📂 **Asosiy quiz tayyorlash**\n\n"
+                    f"📊 Jami savollar: **{q_count} ta**\n"
+                    f"💰 Xizmat narxi: **{blocks} × 1 500 = {price:,} so'm**\n"
+                    f"💼 Balansda: **{bal:,} so'm**\n"
+                    f"➖ Yetishmaydi: **{needed:,} so'm**\n\n" if needed > 0 else
+                    f"📂 **Asosiy quiz tayyorlash**\n\n"
+                    f"📊 Jami savollar: **{q_count} ta**\n"
+                    f"💰 Xizmat narxi: **{blocks} × 1 500 = {price:,} so'm**\n"
+                    f"💼 Balansda: **{bal:,} so'm**\n\n"
+                )
+                pay_text += "✅ Namuna ma'qul bo'lsa, davom etish tugmasini bosing."
+
                 btns = [
-                    [Button.text("✅ Maqul, davom etamiz")],
-                    [Button.text("❌ Bekor qilish")],
+                    [Button.text("✅ Maqul, davom etamiz", resize=True)],
+                    [Button.text("❌ Bekor qilish", resize=True)],
                 ]
+
+                # MUHIM: Telegram edit qilingan xabarga ReplyKeyboard (Button.text) qo'shmaydi.
+                # Shuning uchun progress xabarini faqat matn sifatida edit qilamiz,
+                # tugmalar esa alohida yangi xabar bilan yuboriladi.
+                sent_btn_msg = None
                 if progress_msg:
                     try:
-                        await progress_msg.edit(final_text, buttons=btns)
+                        await progress_msg.edit(final_text)
                     except Exception:
-                        await bot_client.send_message(chat_id, final_text, buttons=btns)
+                        pass
                 else:
-                    await bot_client.send_message(chat_id, final_text, buttons=btns)
+                    await bot_client.send_message(chat_id, final_text)
+
+                sent_btn_msg = await bot_client.send_message(chat_id, pay_text, buttons=btns)
+                try:
+                    remember_cleanup(uid, getattr(sent_btn_msg, 'id', None))
+                except Exception:
+                    pass
 
                 state = user_states.get(uid)
                 if state:
