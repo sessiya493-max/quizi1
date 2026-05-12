@@ -6,6 +6,8 @@ AI Quiz Bot
 - Ko'p akkaunt pool
 """
 
+
+
 import asyncio
 import json
 import logging
@@ -1784,21 +1786,49 @@ CLICK_SERVICE_ID       = _os.environ.get("CLICK_SERVICE_ID", "")
 CLICK_SECRET_KEY       = _os.environ.get("CLICK_SECRET_KEY", "")
 CLICK_MERCHANT_ID      = _os.environ.get("CLICK_MERCHANT_ID", "")
 CLICK_MERCHANT_USER_ID = _os.environ.get("CLICK_MERCHANT_USER_ID", "")
-SERVER_PORT            = int(_os.environ.get("SERVER_PORT", "8080"))
+SERVER_PORT            = int(_os.environ.get("PORT") or _os.environ.get("SERVER_PORT") or "8080")
 CLICK_BASE_URL         = "https://my.click.uz/services/pay"
 
 # Bot veb serveri asosiy URL — shartlar sahifalari uchun
 WEB_BASE_URL = _os.environ.get("WEB_BASE_URL", "")  # masalan: https://yourapp.up.railway.app
 
 def create_click_url(amount: int, merchant_trans_id: str) -> str:
+    """CLICK to'lov havolasini xavfsiz query params bilan yaratadi."""
+    from urllib.parse import urlencode
+
+    params = {
+        "service_id": CLICK_SERVICE_ID,
+        "merchant_id": CLICK_MERCHANT_ID,
+        "amount": int(amount),
+        # CLICK hosted checkout shu parametrni callbackda merchant_trans_id sifatida qaytaradi
+        "transaction_param": merchant_trans_id,
+        "return_url": _os.environ.get("CLICK_RETURN_URL", "https://t.me/quiz_import_bot"),
+    }
+    return f"{CLICK_BASE_URL}?{urlencode(params)}"
+
+def get_click_merchant_trans_id(data: dict) -> str:
+    """CLICK callbacklarda invoice ID turli nomda kelishi mumkin — hammasini qo'llab-quvvatlaymiz."""
     return (
-        f"{CLICK_BASE_URL}"
-        f"?service_id={CLICK_SERVICE_ID}"
-        f"&merchant_id={CLICK_MERCHANT_ID}"
-        f"&amount={amount}"
-        f"&transaction_param={merchant_trans_id}"
-        f"&return_url=https://t.me/quiz_import_bot"
+        data.get("merchant_trans_id")
+        or data.get("transaction_param")
+        or data.get("merchant_transaction_id")
+        or data.get("merchant_trans_id[]")
+        or ""
     )
+
+async def read_click_data(request):
+    """CLICK callback ma'lumotlarini form yoki JSON ko'rinishida o'qiydi."""
+    try:
+        if request.content_type and "application/json" in request.content_type:
+            data = await request.json()
+            return {str(k): str(v) for k, v in data.items()}
+    except Exception:
+        pass
+    data = dict(await request.post())
+    return {str(k): str(v) for k, v in data.items()}
+
+def click_config_ok() -> bool:
+    return bool(CLICK_SERVICE_ID and CLICK_MERCHANT_ID and CLICK_SECRET_KEY)
 
 def verify_click_signature(data: dict, action: int) -> bool:
     """Click MD5 imzosini tekshiradi (sign_time bilan)."""
@@ -3110,6 +3140,7 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
+docx yoki txt fayl qilib ber
 ```
 
 ━━━━━━━━━━━━━━━
@@ -3779,6 +3810,15 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
     #  tugmalari doim ishlaydi.
     # ============================================================
 
+    def _btn_text(event) -> str:
+        """Reply keyboard matnini xavfsiz normalizatsiya qiladi."""
+        return ((getattr(event, "raw_text", None) or getattr(event, "text", None) or "")
+                .replace("\ufe0f", "")
+                .strip())
+
+    def _is_btn(event, name: str) -> bool:
+        return (not getattr(event, "file", None)) and _btn_text(event) == name.replace("\ufe0f", "").strip()
+
     def profile_menu_buttons():
         return [
             [Button.text("💰 Balansni ko'rish", resize=True), Button.text("💳 To'lov qilish", resize=True)],
@@ -3786,7 +3826,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             [Button.text("🔙 Bosh menyu", resize=True)],
         ]
 
-    @bot_client.on(events.NewMessage(func=lambda e: (not e.file) and ((e.raw_text or "").strip() == "👤 Profil")))
+    @bot_client.on(events.NewMessage(func=lambda e: _is_btn(e, "👤 Profil")))
     async def profile_button_handler(event):
         uid = event.sender_id
         bal = db_get_balance(uid)
@@ -3811,7 +3851,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         )
         raise events.StopPropagation
 
-    @bot_client.on(events.NewMessage(func=lambda e: (not e.file) and ((e.raw_text or "").strip() == "💰 Balansni ko'rish")))
+    @bot_client.on(events.NewMessage(func=lambda e: _is_btn(e, "💰 Balansni ko'rish")))
     async def profile_balance_button_handler(event):
         uid = event.sender_id
         bal = db_get_balance(uid)
@@ -3844,7 +3884,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             )
         raise events.StopPropagation
 
-    @bot_client.on(events.NewMessage(func=lambda e: (not e.file) and ((e.raw_text or "").strip() == "💳 To'lov qilish")))
+    @bot_client.on(events.NewMessage(func=lambda e: _is_btn(e, "💳 To'lov qilish")))
     async def profile_pay_button_handler(event):
         uid = event.sender_id
         bal = db_get_balance(uid)
@@ -3858,7 +3898,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         )
         raise events.StopPropagation
 
-    @bot_client.on(events.NewMessage(func=lambda e: (not e.file) and ((e.raw_text or "").strip() == "🎁 Referal")))
+    @bot_client.on(events.NewMessage(func=lambda e: _is_btn(e, "🎁 Referal")))
     async def profile_referral_button_handler(event):
         uid = event.sender_id
         ref_count = db_get_referral_count(uid)
@@ -3889,10 +3929,10 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         )
         raise events.StopPropagation
 
-    @bot_client.on(events.NewMessage(func=lambda e: not e.file and not e.text.startswith("/")))
+    @bot_client.on(events.NewMessage(func=lambda e: (not e.file) and not ((e.raw_text or e.text or "").strip().startswith("/"))))
     async def on_msg(event):
         uid = event.sender_id
-        text = event.text.strip()
+        text = _btn_text(event)
         adm = is_admin(uid)
         astate = admin_states.get(uid, {})
 
@@ -6281,9 +6321,11 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
 
     async def click_prepare(request):
         try:
-            data = dict(await request.post())
+            data = await read_click_data(request)
             log.info(f"CLICK Prepare: {data}")
-            merchant_trans_id = data.get("merchant_trans_id", "")
+            if not click_config_ok():
+                return aio_web.json_response({"error": -9, "error_note": "CLICK env sozlanmagan"})
+            merchant_trans_id = get_click_merchant_trans_id(data)
             amount = float(data.get("amount", 0))
             if not verify_click_signature(data, action=0):
                 return aio_web.json_response({"error": -1, "error_note": "SIGN CHECK FAILED"})
@@ -6307,9 +6349,11 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
 
     async def click_complete(request):
         try:
-            data = dict(await request.post())
+            data = await read_click_data(request)
             log.info(f"CLICK Complete: {data}")
-            merchant_trans_id = data.get("merchant_trans_id", "")
+            if not click_config_ok():
+                return aio_web.json_response({"error": -9, "error_note": "CLICK env sozlanmagan"})
+            merchant_trans_id = get_click_merchant_trans_id(data)
             error = int(data.get("error", 0))
             if not verify_click_signature(data, action=1):
                 return aio_web.json_response({"error": -1, "error_note": "SIGN CHECK FAILED"})
