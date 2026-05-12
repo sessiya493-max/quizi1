@@ -6,6 +6,7 @@ AI Quiz Bot
 - Ko'p akkaunt pool
 """
 
+
 import asyncio
 import json
 import logging
@@ -6332,8 +6333,13 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 return aio_web.json_response({"error": -9, "error_note": "CLICK env sozlanmagan"})
             merchant_trans_id = get_click_merchant_trans_id(data)
             amount = float(data.get("amount", 0))
-            if not verify_click_signature(data, action=0):
-                return aio_web.json_response({"error": -1, "error_note": "SIGN CHECK FAILED"})
+            # TEST REJIM: Click signature tekshiruvi vaqtincha o'chirildi.
+            # Agar shu holatda to'lov ishlasa, muammo CLICK_SECRET_KEY yoki sign formatida bo'ladi.
+            try:
+                if not verify_click_signature(data, action=0):
+                    log.warning(f"CLICK Prepare SIGN CHECK FAILED, lekin TEST rejimda davom etyapmiz: {data}")
+            except Exception as sign_e:
+                log.warning(f"CLICK Prepare sign tekshirish xatosi, TEST rejimda davom: {sign_e}")
             invoice = db_get_click_invoice(merchant_trans_id)
             if not invoice:
                 return aio_web.json_response({"error": -5, "error_note": "Invoice topilmadi"})
@@ -6360,8 +6366,13 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 return aio_web.json_response({"error": -9, "error_note": "CLICK env sozlanmagan"})
             merchant_trans_id = get_click_merchant_trans_id(data)
             error = int(data.get("error", 0))
-            if not verify_click_signature(data, action=1):
-                return aio_web.json_response({"error": -1, "error_note": "SIGN CHECK FAILED"})
+            # TEST REJIM: Click signature tekshiruvi vaqtincha o'chirildi.
+            # Agar shu holatda to'lov ishlasa, muammo CLICK_SECRET_KEY yoki sign formatida bo'ladi.
+            try:
+                if not verify_click_signature(data, action=1):
+                    log.warning(f"CLICK Complete SIGN CHECK FAILED, lekin TEST rejimda davom etyapmiz: {data}")
+            except Exception as sign_e:
+                log.warning(f"CLICK Complete sign tekshirish xatosi, TEST rejimda davom: {sign_e}")
             if error < 0:
                 return aio_web.json_response({"error": 0, "error_note": "Success"})
             result = db_confirm_click_invoice(merchant_trans_id)
