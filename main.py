@@ -3140,7 +3140,6 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
-docx yoki txt fayl qilib ber
 ```
 
 ━━━━━━━━━━━━━━━
