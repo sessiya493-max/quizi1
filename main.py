@@ -6,8 +6,6 @@ AI Quiz Bot
 - Ko'p akkaunt pool
 """
 
-
-
 import asyncio
 import json
 import logging
@@ -1804,6 +1802,13 @@ def create_click_url(amount: int, merchant_trans_id: str) -> str:
         "transaction_param": merchant_trans_id,
         "return_url": _os.environ.get("CLICK_RETURN_URL", "https://t.me/quiz_import_bot"),
     }
+
+    # Ba'zi CLICK servislarida merchant_user_id majburiy bo'ladi.
+    # Eski serverda ishlagan, yangi serverda callback kelmayotgan holatda
+    # eng ko'p uchraydigan sabab shu parametr linkda yo'qligi.
+    if CLICK_MERCHANT_USER_ID:
+        params["merchant_user_id"] = CLICK_MERCHANT_USER_ID
+
     return f"{CLICK_BASE_URL}?{urlencode(params)}"
 
 def get_click_merchant_trans_id(data: dict) -> str:
@@ -5677,6 +5682,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         # CLICK invoice yaratish
         merchant_trans_id = db_create_click_invoice(uid, amount)
         click_url = create_click_url(amount, merchant_trans_id)
+        log.info(f"CLICK pay URL yaratildi: {click_url}")
 
         await event.respond(
             f"💳 **CLICK orqali to'lov**\n\n"
@@ -6466,11 +6472,29 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
     app.router.add_post("/click/prepare", click_prepare)
     app.router.add_post("/click/complete", click_complete)
 
-    # CLICK kabineti URL saqlashdan oldin manzilni tekshirishi mumkin.
-    # Asosiy to'lov callbacklari POST orqali ishlaydi, bu GET route'lar esa
-    # faqat URL validation uchun 200 OK qaytaradi.
-    app.router.add_get("/click/prepare", lambda r: aio_web.json_response({"status": "ok", "endpoint": "click_prepare"}))
-    app.router.add_get("/click/complete", lambda r: aio_web.json_response({"status": "ok", "endpoint": "click_complete"}))
+    # CLICK kabineti URLni saqlashda GET bilan tekshirishi mumkin.
+    # To'lovning o'zi POST orqali ishlaydi, GET faqat 200 OK qaytarish uchun.
+    async def click_prepare_get(request):
+        log.info("CLICK Prepare GET tekshiruv keldi")
+        return aio_web.json_response({"status": "ok", "endpoint": "click_prepare"})
+
+    async def click_complete_get(request):
+        log.info("CLICK Complete GET tekshiruv keldi")
+        return aio_web.json_response({"status": "ok", "endpoint": "click_complete"})
+
+    async def click_debug(request):
+        return aio_web.json_response({
+            "status": "ok",
+            "service_id_set": bool(CLICK_SERVICE_ID),
+            "merchant_id_set": bool(CLICK_MERCHANT_ID),
+            "merchant_user_id_set": bool(CLICK_MERCHANT_USER_ID),
+            "secret_key_set": bool(CLICK_SECRET_KEY),
+            "port": SERVER_PORT,
+        })
+
+    app.router.add_get("/click/prepare", click_prepare_get)
+    app.router.add_get("/click/complete", click_complete_get)
+    app.router.add_get("/click/debug", click_debug)
 
     app.router.add_get("/", lambda r: aio_web.json_response({"status": "ok", "bot": "AI Quiz Bot"}))
     app.router.add_get("/health", lambda r: aio_web.json_response({"status": "ok"}))
