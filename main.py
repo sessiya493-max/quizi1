@@ -2546,6 +2546,21 @@ async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
         await userbot.send_message(qbot, title);     await asyncio.sleep(3)
         await userbot.send_message(qbot, "/skip");   await asyncio.sleep(3)
 
+        async def update_real_progress(done_count: int):
+            """Foizni real yuborilgan savollar soniga qarab yangilaydi."""
+            try:
+                total_q = max(len(req.questions), 1)
+                pct = min(95, max(5, int(done_count * 100 / total_q)))
+                remain_q = max(total_q - done_count, 0)
+                remain_sec = max(remain_q * 3, 1)
+                txt = progress_text(pct, min(done_count, total_q), total_q, remain_sec)
+                pmid = getattr(req, "progress_msg_id", None)
+                if pmid:
+                    await bot_client.edit_message(req.chat_id, pmid, txt, buttons=main_menu(is_admin(req.user_id), req.user_id))
+            except Exception as e:
+                if "message was not modified" not in str(e).lower():
+                    log.warning(f"Real progress edit xato: {e}")
+
         for i, q in enumerate(req.questions):
             try:
                 if AD_EVERY > 0 and i > 0 and i % AD_EVERY == 0:
@@ -2553,6 +2568,7 @@ async def make_quiz(userbot: TelegramClient, req: QuizRequest) -> Optional[str]:
                     await asyncio.sleep(2)
 
                 await send_poll(userbot, qbot, q)
+                await update_real_progress(i + 1)
                 log.info(f"  [{i+1}/{len(req.questions)}] OK")
                 await asyncio.sleep(2)
             except Exception as e:
@@ -2779,6 +2795,27 @@ def stable_answer_index(q: dict) -> int:
     if 0 <= ans < len(opts):
         return ans
     return 0
+
+
+def shuffle_options_keep_correct(q_text: str, options: list, correct: int) -> dict:
+    """Savol tartibini o'zgartirmaydi, faqat variantlar joyini aralashtiradi.
+    To'g'ri javob indeksi aralashgan variantlarga moslab qayta hisoblanadi.
+    @QuizBot ichida esa No Shuffle tanlanadi, shuning uchun savollar ketma-ket qoladi.
+    """
+    if not options:
+        return {"q": q_text, "opts": [], "ans": 0, "correct_text": ""}
+    if correct < 0 or correct >= len(options):
+        correct = 0
+    paired = list(enumerate(options))
+    random.shuffle(paired)
+    shuffled_options = [opt for _, opt in paired]
+    new_correct = next((idx for idx, (old_idx, _) in enumerate(paired) if old_idx == correct), 0)
+    return {
+        "q": q_text,
+        "opts": shuffled_options,
+        "ans": new_correct,
+        "correct_text": shuffled_options[new_correct]
+    }
 
 # ============================================================
 #  NAVBAT ISHLOVCHISI
@@ -3682,9 +3719,9 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 )
 
                 preview_count = min(5, q_count)
-                # Namuna uchun savollar random tanlanadi, LEKIN quiz ichidagi tartib va variantlar aralashtirilmaydi.
-                # @QuizBot aralash rejimda to'g'ri javobni chalkashtirishi mumkin, shuning uchun order_choice doim "order".
-                preview_qs = random.sample(qs, preview_count) if q_count > preview_count else list(qs)
+                # Namuna ham ketma-ket bo'ladi: fayldagi birinchi 5 ta savol olinadi.
+                # Variantlar esa yuqorida parse paytida aralashtirilgan bo'ladi.
+                preview_qs = list(qs[:preview_count])
 
                 # Preview quizni yuboramiz (bepul, haqiqiy akkaunt bilan)
                 try:
@@ -5301,23 +5338,9 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                         options.append(opt)
 
                 if len(options) >= 2:
-                    # Variantlarni aralashtiramiz, lekin savollar tartibi o'zgarmaydi.
-                    # To'g'ri javob indeksini qayta hisoblaymiz.
-                    paired = list(enumerate(options))
-                    random.shuffle(paired)
-
-                    shuffled_options = [opt for _, opt in paired]
-                    new_correct = next(
-                        idx for idx, (old_idx, _) in enumerate(paired)
-                        if old_idx == correct
-                    )
-
-                    qs.append({
-                        "q": q_text,
-                        "opts": shuffled_options,
-                        "ans": new_correct,
-                        "correct_text": shuffled_options[new_correct]
-                    })
+                    # Savol tartibi saqlanadi, faqat variantlar aralashtiriladi.
+                    # To'g'ri javob indeksi yangi variant tartibiga moslab qayta hisoblanadi.
+                    qs.append(shuffle_options_keep_correct(q_text, options, correct))
 
             if qs:
                 return qs
@@ -5379,7 +5402,8 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                         i += 1
 
                 if q_text and len(options) >= 2:
-                    qs.append({"q": q_text, "opts": options, "ans": correct, "correct_text": options[correct] if 0 <= correct < len(options) else options[0]})
+                    # Bu formatda ham variantlar aralashtiriladi, savollar ketma-ket qoladi.
+                    qs.append(shuffle_options_keep_correct(q_text, options, correct))
             else:
                 i += 1
 
