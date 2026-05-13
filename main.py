@@ -3158,7 +3158,7 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
-docx yoki txt fayl qilib ber
+docx fayl qilib ber
 ```
 
 ━━━━━━━━━━━━━━━
@@ -6177,53 +6177,92 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
     # ============================================================
     #  YORDAMCHI: XABARDAN SUMMA VA KARTA AJRATIB OLISH
     # ============================================================
+    def _normalize_uzs_amount(raw: str) -> Optional[int]:
+        """'1 000.00', '2.000,00', '1000' kabi formatlarni int so'mga aylantiradi."""
+        if not raw:
+            return None
+        raw = raw.replace("\xa0", " ").strip()
+        raw = re.sub(r"[^\d\.,\s]", "", raw)
+        compact = raw.replace(" ", "")
+
+        # 2.000,00 -> 2000
+        if "," in compact and "." in compact:
+            if compact.rfind(",") > compact.rfind("."):
+                compact = compact.replace(".", "").split(",")[0]
+            else:
+                compact = compact.replace(",", "").split(".")[0]
+        # 1 000.00 -> 1000, 1000.00 -> 1000
+        elif "." in compact:
+            parts = compact.split(".")
+            if len(parts[-1]) == 2:
+                compact = "".join(parts[:-1])
+            else:
+                compact = compact.replace(".", "")
+        # 2 000,00 -> 2000, 1000,00 -> 1000
+        elif "," in compact:
+            parts = compact.split(",")
+            if len(parts[-1]) == 2:
+                compact = "".join(parts[:-1])
+            else:
+                compact = compact.replace(",", "")
+
+        compact = re.sub(r"\D", "", compact)
+        return int(compact) if compact else None
+
     def _parse_amount(text: str) -> Optional[int]:
         """
-        Xabardan summani topish.
-        Humo formatlari:
-          ➕ 2.000,00 UZS
-          ➕ **2.000,00 UZS**
+        Xabardan kirim summasini topadi.
+        Qo'llab-quvvatlaydi:
+          + 1 000.00 UZS      (@cardxabarbot / Uzcard)
+          +1 000,00 UZS
+          ➕ 2.000,00 UZS      (@humocardbot / Humo)
           +2000 UZS
-          2 000,00 UZS
+
+        Muhim: avval '+' yoki '➕' bilan kelgan kirim summasini oladi.
+        Shunda balans qatori, masalan '4 138.60 UZS', adashib olinmaydi.
         """
-        # Markdown bold va belgilarni tozalash
-        clean = text.replace('*', '').replace('_', '').replace('`', '')
+        clean = (text or "").replace("*", "").replace("_", "").replace("`", "")
 
         patterns = [
-            # "2.000,00 UZS" — nuqta minglik, vergul kasr (Humo asosiy format)
-            r'[➕\+]?\s*([\d]{1,3}(?:\.[\d]{3})*),\d{2}\s*UZS',
-            # "2 000,00 UZS"
-            r'[➕\+]?\s*([\d]{1,3}(?:\s[\d]{3})*),\d{2}\s*UZS',
-            # "2000 UZS" yoki "2000,00 UZS"
-            r'[➕\+]?\s*(\d+)(?:,\d+)?\s*UZS',
-            # Umumiy fallback
-            r'(\d[\d\.\s]+\d)\s*UZS',
+            # + 1 000.00 UZS, +1 000,00 UZS, ➕ 2.000,00 UZS
+            r"(?:^|\n)\s*[➕\+]\s*([\d\s\.,]+)\s*UZS\b",
+            # Kirim/Perevod kabi so'zlardan keyingi summa
+            r"(?:kirim|perevod|перевод|поступление|зачисление)[^\n]*\n?\s*[➕\+]?\s*([\d\s\.,]+)\s*UZS\b",
+            # Fallback: birinchi UZS summasi
+            r"([\d\s\.,]+)\s*UZS\b",
         ]
 
         for pat in patterns:
-            m = re.search(pat, clean, re.IGNORECASE)
-            if m:
-                raw = m.group(1)
-                # Nuqta va bo'shliqlarni olib tashlaymiz (minglik ajratgich)
-                raw = raw.replace('.', '').replace(' ', '').replace('\xa0', '')
-                try:
-                    return int(raw)
-                except Exception:
-                    continue
+            m = re.search(pat, clean, re.IGNORECASE | re.MULTILINE)
+            if not m:
+                continue
+            amount = _normalize_uzs_amount(m.group(1))
+            if amount is not None:
+                return amount
         return None
 
     def _parse_card(text: str) -> Optional[str]:
         """
-        Xabardan karta oxirgi 4 raqamini topib, to'liq kartani qaytaradi.
-        Humo/Uzcаrd formatlar: HUMOCARD *8906, UZCARD *1234, **** 1234, karta 8600 **** 1234.
+        Xabardan karta oxirgi 4 raqamini topib, PAYMENT_CARDS ichidagi to'liq kartani qaytaradi.
+        Qo'llab-quvvatlaydi:
+          ***3173
+          **** 3173
+          HUMOCARD *8906
+          UZCARD *3173
         """
+        text = text or ""
         candidates = []
 
-        # Eng ishonchli format: *8906, **8906, **** 8906
-        candidates += re.findall(r'\*+\s*(\d{4})\b', text)
+        # Eng ishonchli formatlar: ***3173, **** 3173, *8906
+        candidates += re.findall(r"\*+\s*(\d{4})\b", text)
 
-        # Ba'zi xabarlarda yulduzcha bo'lmasligi mumkin, shuning uchun matndagi 4 xonali guruhlarni ham ko'ramiz.
-        candidates += re.findall(r'(?<!\d)(\d{4})(?!\d)', text)
+        # 'karta' qatori atrofidagi raqamlar
+        for line in text.splitlines():
+            if any(w in line.lower() for w in ["karta", "card", "карта"]):
+                candidates += re.findall(r"(?<!\d)(\d{4})(?!\d)", line)
+
+        # Umumiy fallback
+        candidates += re.findall(r"(?<!\d)(\d{4})(?!\d)", text)
 
         seen = set()
         for last4 in candidates:
