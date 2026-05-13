@@ -5,10 +5,7 @@ AI Quiz Bot
 - Knopkali interfeys
 - Ko'p akkaunt pool
 """
-from dotenv import load_dotenv
-import os
 
-load_dotenv()
 
 
 import asyncio
