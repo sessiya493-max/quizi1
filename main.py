@@ -5,7 +5,10 @@ AI Quiz Bot
 - Knopkali interfeys
 - Ko'p akkaunt pool
 """
+from dotenv import load_dotenv
+import os
 
+load_dotenv()
 
 
 import asyncio
@@ -72,20 +75,19 @@ if not _os.path.exists("/data"):
 #  TO'LOV TIZIMI
 # ============================================================
 
-# Humo kartalar ro'yxati — navbat bilan beriladi
-# ⬇️ O'z karta raqamlaringizni shu yerga yozing!
-HUMO_CARDS = [
-   "9860 3501 4339 8906",   # karta 1 — o'zgartiring
-    "9860 3566 0573 8935",   # karta 2 — o'zgartiring
-    "9860 3466 0594 5705",   # karta 3 — o'zgartiring
-]
+# KARTALAR FAQAT .env / Railway Variables dan o'qiladi.
+# ESKI hardcode kartalar olib tashlandi.
+# Humo misol: HUMO_CARDS=9860196619117118,9860346605945705
+# Uzcard misol: UZCARD_CARDS=8600572989473173,5614682219852318
+def _env_cards(name: str) -> list[str]:
+    return [
+        re.sub(r"\D", "", c)
+        for c in _os.environ.get(name, "").split(",")
+        if re.sub(r"\D", "", c)
+    ]
 
-# Uzcard kartalar: Railway .env da UZCARD_CARDS="8600...,8600..." qilib berish mumkin.
-# Agar hozircha Uzcard karta kiritilmasa, bot faqat yuqoridagi 3 ta Humo kartani ishlatadi.
-UZCARD_CARDS = [
-    c.strip() for c in _os.environ.get("UZCARD_CARDS", "").split(",")
-    if c.strip()
-]
+HUMO_CARDS = _env_cards("HUMO_CARDS")
+UZCARD_CARDS = _env_cards("UZCARD_CARDS")
 
 # To'lov uchun umumiy karta pool: Humo + Uzcard
 PAYMENT_CARDS = HUMO_CARDS + [c for c in UZCARD_CARDS if c not in HUMO_CARDS]
@@ -96,7 +98,7 @@ PAYMENT_TIMEOUT    = 600     # sekund (10 daqiqa)
 HUMOCARD_BOT    = "@humocardbot"
 UZCARD_BOT      = "@cardxabarbot"
 CARD_NOTIFY_BOTS = ["humocardbot", "cardxabarbot"]
-NOTIFY_PHONE    = "+998934897111"  # @humocardbot yoki @cardxabarbot xabar keladigan raqam
+NOTIFY_PHONE    = _os.environ.get("NOTIFY_PHONE", "")  # @humocardbot yoki @cardxabarbot xabar keladigan raqam
 
 # Kartalar band/bo'sh holati: card_num -> user_id yoki None
 card_assignments: dict = {card: None for card in PAYMENT_CARDS}
@@ -5283,7 +5285,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
 
             # Kartalar holati
             card_lines = []
-            for card in HUMO_CARDS:
+            for card in PAYMENT_CARDS:
                 assigned = card_assignments.get(card)
                 if assigned:
                     card_lines.append(f"  🔴 `{card[-9:]}` → user `{assigned}`")
