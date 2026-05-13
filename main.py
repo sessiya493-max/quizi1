@@ -7,6 +7,7 @@ AI Quiz Bot
 """
 
 
+
 import asyncio
 import json
 import logging
@@ -76,22 +77,34 @@ if not _os.path.exists("/data"):
 HUMO_CARDS = [
    "9860 3501 4339 8906",   # karta 1 — o'zgartiring
     "9860 3566 0573 8935",   # karta 2 — o'zgartiring
-    "9860 3466 0594 5705",   # kart
+    "9860 3466 0594 5705",   # karta 3 — o'zgartiring
 ]
+
+# Uzcard kartalar: Railway .env da UZCARD_CARDS="8600...,8600..." qilib berish mumkin.
+# Agar hozircha Uzcard karta kiritilmasa, bot faqat yuqoridagi 3 ta Humo kartani ishlatadi.
+UZCARD_CARDS = [
+    c.strip() for c in _os.environ.get("UZCARD_CARDS", "").split(",")
+    if c.strip()
+]
+
+# To'lov uchun umumiy karta pool: Humo + Uzcard
+PAYMENT_CARDS = HUMO_CARDS + [c for c in UZCARD_CARDS if c not in HUMO_CARDS]
+
 AI_PRICE           = 2000    # 1 ta AI test narxi (so'm)
 FILE_PRICE_PER_25  = 1500    # har 25 savol uchun narx (fayl orqali)
 PAYMENT_TIMEOUT    = 600     # sekund (10 daqiqa)
 HUMOCARD_BOT    = "@humocardbot"
-NOTIFY_PHONE    = "+998934897111"  # @humocardbot xabar keladigan raqam
+UZCARD_BOT      = "@cardxabarbot"
+CARD_NOTIFY_BOTS = ["humocardbot", "cardxabarbot"]
+NOTIFY_PHONE    = "+998934897111"  # @humocardbot yoki @cardxabarbot xabar keladigan raqam
 
 # Kartalar band/bo'sh holati: card_num -> user_id yoki None
-card_assignments: dict = {card: None for card in HUMO_CARDS}
+card_assignments: dict = {card: None for card in PAYMENT_CARDS}
 
 
 def get_free_card(user_id: int) -> Optional[str]:
-    """Bo'sh karta berish — navbat bilan"""
-    busy = set(card_assignments.values())
-    for card in HUMO_CARDS:
+    """Bo'sh karta berish — navbat bilan. Humo va Uzcard kartalar bitta poolda ishlaydi."""
+    for card in PAYMENT_CARDS:
         if card_assignments.get(card) is None:
             card_assignments[card] = user_id
             return card
@@ -215,7 +228,7 @@ def db_create_payment(user_id: int, card_num: str, amount: int) -> int:
            (user_id, card_num, amount, status, created_at, expires_at)
            VALUES (?, ?, ?, 'pending',
                    datetime('now'),
-                   datetime('now','+3 minutes'))""",
+                   datetime('now','+10 minutes'))""",
         (user_id, card_num, amount)
     )
     pay_id = cur.lastrowid
@@ -3146,6 +3159,7 @@ MUHIM QOIDALAR:
 - Hech qanday izoh, kirish so'zi yoki xulosa yozma.
 - Kod bloki ishlatma, oddiy matn ko'rinishida qaytar.
 - Savollar sonini kamaytirma.
+docx yoki txt fayl qilib ber
 ```
 
 ━━━━━━━━━━━━━━━
@@ -3863,15 +3877,12 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         tests = bal // AI_PRICE
         if bal < AI_PRICE:
             needed = AI_PRICE - bal
-            merchant_trans_id = db_create_click_invoice(uid, needed)
-            click_url = create_click_url(needed, merchant_trans_id)
             await event.respond(
                 f"💰 **Balans: {bal:,} so'm**\n"
                 f"🤖 AI test uchun kerak: {AI_PRICE:,} so'm\n"
                 f"❌ Yetishmaydi: **{needed:,} so'm**\n\n"
-                f"Quyidagi tugma orqali CLICK bilan to'lov qiling 👇",
+                f"To'lov qilish uchun pastdagi tugmani bosing 👇",
                 buttons=[
-                    [Button.url(f"💳 CLICK orqali {needed:,} so'm to'lash", click_url)],
                     [Button.text("💳 To'lov qilish", resize=True)],
                     [Button.text("🔙 Bosh menyu", resize=True)],
                 ]
@@ -3895,7 +3906,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         bal = db_get_balance(uid)
         user_states[uid] = UserState(step="wait_click_amount")
         await event.respond(
-            f"💳 **CLICK orqali to'lov**\n\n"
+            f"💳 **Karta orqali to'lov**\n\n"
             f"💰 Hozirgi balans: **{bal:,} so'm**\n\n"
             f"Qancha to'lamoqchisiz? Summani so'mda yozing.\n"
             f"Masalan: `5000`",
@@ -4477,18 +4488,14 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                     state.step = "wait_payment"
                     user_states[uid] = state
                     needed = AI_PRICE - bal
-                    merchant_trans_id = db_create_click_invoice(uid, needed)
-                    click_url = create_click_url(needed, merchant_trans_id)
                     await event.respond(
                         f"❌ **Balans yetarli emas!**\n\n"
                         f"💰 Balansda: {bal:,} so'm\n"
                         f"💳 Kerak: {AI_PRICE:,} so'm\n"
                         f"➖ Yetishmaydi: **{needed:,} so'm**\n\n"
-                        f"📌 Sozlamalaringiz saqlanib qoldi — to'lovdan keyin avtomatik davom etadi!",
-                        buttons=[
-                            [Button.url(f"💳 CLICK orqali {needed:,} so'm to'lash", click_url)],
-                        ]
+                        f"📌 Sozlamalaringiz saqlanib qoldi — to'lovdan keyin avtomatik davom etadi!"
                     )
+                    await _send_humo_payment(uid, needed, chat_id=event.chat_id)
                     return
 
                 state.step = "ai_generating"
@@ -4580,10 +4587,8 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                         buttons=[[Button.text("🔙 Bosh menyu")]]
                     )
                 else:
-                    # Balans yetarli emas — to'liq ma'lumot + Click tugmasi
+                    # Balans yetarli emas — Humo karta orqali to'lov
                     needed = price - bal_now
-                    mtid = db_create_click_invoice(uid, needed)
-                    curl = create_click_url(needed, mtid)
                     state.step = "wait_payment_file"
                     user_states[uid] = state
                     await event.respond(
@@ -4591,11 +4596,9 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                         f"💰 Xizmat haqqi: {blocks} × 1 500 = **{price:,} so'm**\n"
                         f"💼 Balansda: {bal_now:,} so'm\n"
                         f"➖ Yetishmaydi: **{needed:,} so'm**\n\n"
-                        f"📌 Savollar saqlanib qoldi — to'lovdan keyin davom etadi!",
-                        buttons=[
-                            [Button.url(f"💳 CLICK orqali {needed:,} so'm to'lash", curl)],
-                        ]
+                        f"📌 Savollar saqlanib qoldi — to'lovdan keyin davom etadi!"
                     )
+                    await _send_humo_payment(uid, needed, chat_id=event.chat_id)
                 return
 
             if text == "❌ Bekor qilish":
@@ -5610,11 +5613,11 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         bal = db_get_balance(uid)
         user_states[uid] = UserState(step="wait_click_amount")
         await event.respond(
-            f"💳 **CLICK orqali to'lov**\n\n"
+            f"💳 **Karta orqali to'lov**\n\n"
             f"💰 Hozirgi balans: **{bal:,} so'm**\n\n"
             f"Qancha to'lamoqchisiz? (so'mda yozing)\n"
             f"👇👇👇👇👇",
-            buttons=[[Button.text("🔙 Bosh menyu")]]
+            buttons=[[Button.text("🔙 Bosh menyu", resize=True)]]
         )
 
     @bot_client.on(events.NewMessage(func=lambda e: not e.file
@@ -5625,15 +5628,14 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
         tests = bal // AI_PRICE
         if bal < AI_PRICE:
             needed = AI_PRICE - bal
-            merchant_trans_id = db_create_click_invoice(uid, needed)
-            click_url = create_click_url(needed, merchant_trans_id)
             await event.respond(
                 f"💰 **Balans: {bal:,} so'm**\n"
                 f"🤖 AI test uchun kerak: {AI_PRICE:,} so'm\n"
                 f"❌ Yetishmaydi: **{needed:,} so'm**\n\n"
-                f"📌 To'lovdan keyin /start bosing — davom etadi.",
+                f"To'lov qilish uchun pastdagi tugmani bosing 👇",
                 buttons=[
-                    [Button.url(f"💳 CLICK orqali {needed:,} so'm to'lash", click_url)],
+                    [Button.text("💳 To'lov qilish", resize=True)],
+                    [Button.text("🔙 Bosh menyu", resize=True)],
                 ]
             )
         else:
@@ -5649,6 +5651,59 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             )
 
     # pay_click_start olib tashlandi — cmd_pay o'zi bajaradi
+
+    def _card_last4(card: str) -> str:
+        return re.sub(r"\D", "", card)[-4:]
+
+    def _card_pretty(card: str) -> str:
+        digits = re.sub(r"\D", "", card)
+        if len(digits) >= 16:
+            return " ".join([digits[i:i+4] for i in range(0, 16, 4)])
+        return card
+
+    async def _send_humo_payment(user_id: int, amount: int, *, chat_id: Optional[int] = None):
+        """Foydalanuvchiga 3 ta kartadan bo'shini beradi va pending payment yaratadi."""
+        chat_id = chat_id or user_id
+
+        # Avval shu userda pending bo'lsa, o'shani qayta ko'rsatamiz.
+        pending = db_get_pending(user_id)
+        if pending:
+            pay_id, card, old_amount, expires_at = pending
+            card_assignments[card] = user_id
+            await bot_client.send_message(
+                chat_id,
+                f"⏳ **Sizda kutilayotgan to'lov bor**\n\n"
+                f"💰 Summa: **{old_amount:,} so'm**\n"
+                f"💳 Karta: `{_card_pretty(card)}`\n"
+                f"🔢 Karta oxiri: **{_card_last4(card)}**\n\n"
+                f"📌 Iltimos, aynan shu summani shu kartaga o'tkazing.\n"
+                f"✅ To'lov kelgach balans avtomatik to'ldiriladi.",
+                buttons=[[Button.text("🔙 Bosh menyu", resize=True)]],
+            )
+            return
+
+        card = get_free_card(user_id)
+        if not card:
+            await bot_client.send_message(
+                chat_id,
+                "❌ Hozir barcha kartalar band. Iltimos, 5–10 daqiqadan keyin qayta urinib ko'ring.",
+                buttons=[[Button.text("🔙 Bosh menyu", resize=True)]],
+            )
+            return
+
+        pay_id = db_create_payment(user_id, card, amount)
+        await bot_client.send_message(
+            chat_id,
+            f"💳 **Karta orqali to'lov**\n\n"
+            f"💰 To'lov summasi: **{amount:,} so'm**\n"
+            f"💳 Karta raqami:\n`{_card_pretty(card)}`\n"
+            f"🔢 Karta oxiri: **{_card_last4(card)}**\n\n"
+            f"⏳ To'lov uchun vaqt: **10 daqiqa**\n"
+            f"✅ Pul tushgach balans avtomatik to'ldiriladi.\n\n"
+            f"⚠️ Summani to'g'ri yuboring. Bot `@humocardbot` yoki `@cardxabarbot` xabaridan **summa + karta** bo'yicha tasdiqlaydi.",
+            buttons=[[Button.text("🔙 Bosh menyu", resize=True)]],
+        )
+        log.info(f"HUMO payment created: pay_id={pay_id}, user={user_id}, amount={amount}, card={card}")
 
     @bot_client.on(events.NewMessage(
         func=lambda e: not e.file and
@@ -5680,34 +5735,23 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
 
         user_states[uid] = UserState()
 
-        # CLICK invoice yaratish
-        merchant_trans_id = db_create_click_invoice(uid, amount)
-        click_url = create_click_url(amount, merchant_trans_id)
-        log.info(f"CLICK pay URL yaratildi: {click_url}")
-
-        await event.respond(
-            f"💳 **CLICK orqali to'lov**\n\n"
-            f"💰 Summa: **{amount:,} so'm**\n\n"
-            f"👇 Tugmani bosing → CLICK ilovasi ochiladi → to'lang\n"
-            f"✅ To'lov o'tgach balans **avtomatik** yangilanadi",
-            buttons=[
-                [Button.url(f"💳 CLICK da {amount:,} so'm to'lash", click_url)],
-            ]
-        )
-        log.info(f"CLICK invoice: user={uid}, amount={amount}, trans_id={merchant_trans_id}")
+        # HUMO karta orqali pending to'lov yaratish
+        await _send_humo_payment(uid, amount, chat_id=event.chat_id)
 
     # ============================================================
-    #  @HUMOCARDBOT XABAR TINGLOVCHI
+    #  @HUMOCARDBOT + @CARDXABARBOT XABAR TINGLOVCHI
     # ============================================================
     # notify_client global — /notify_ulash orqali o'rnatilishi mumkin
     notify_client_holder = {"client": None}
 
     def setup_notify_listener(client):
-        """Notify client ga @humocardbot handler o'rnatish"""
-        @client.on(events.NewMessage(from_users="humocardbot"))
-        async def on_humo_notify(event):
+        """Notify client ga @humocardbot va @cardxabarbot handler o'rnatish"""
+        @client.on(events.NewMessage(from_users=CARD_NOTIFY_BOTS))
+        async def on_card_notify(event):
             text = event.text or ""
-            log.info(f"humocardbot xabari: {text[:150]}")
+            sender = await event.get_sender()
+            sender_username = (getattr(sender, "username", "") or "").lower()
+            log.info(f"card notify ({sender_username}) xabari: {text[:150]}")
             amount = _parse_amount(text)
             card   = _parse_card(text)
             log.info(f"Parse natijasi: summa={amount}, karta={card}")
@@ -5920,7 +5964,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                         await event.respond(
                             f"✅ **Notify akkaunt ulandi!**\n\n"
                             f"📱 `{phone}` (@{me.username or me.first_name})\n"
-                            f"🔔 @humocardbot endi tinglanadi!",
+                            f"🔔 @humocardbot va @cardxabarbot endi tinglanadi!",
                             buttons=[[Button.text("🔙 Admin panel")]]
                         )
                     else:
@@ -6003,7 +6047,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                     await event.respond(
                         f"✅ **Sessiya tiklandi! Kod shart emas.**\n\n"
                         f"📱 `{NOTIFY_PHONE}`\n"
-                        f"🔔 @humocardbot xabarlari qabul qilinadi!"
+                        f"🔔 @humocardbot va @cardxabarbot xabarlari qabul qilinadi!"
                     )
                     return
                 await client.disconnect()
@@ -6056,7 +6100,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             await event.respond(
                 f"✅ **Notify akkaunt ulandi!**\n\n"
                 f"📱 `{phone}`\n"
-                f"🔔 @humocardbot xabarlari endi qabul qilinadi!"
+                f"🔔 @humocardbot va @cardxabarbot xabarlari endi qabul qilinadi!"
             )
             log.info(f"Notify akkaunt ulandi: {phone}")
         except SessionPasswordNeededError:
@@ -6111,7 +6155,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             admin_states.pop(uid, None)
             await event.respond(
                 f"✅ **Notify akkaunt ulandi!**\n📱 `{phone}`\n"
-                f"🔔 @humocardbot endi tinglanadi!"
+                f"🔔 @humocardbot va @cardxabarbot endi tinglanadi!"
             )
         except Exception as e:
             await event.respond(f"❌ Parol xato: {e}")
@@ -6171,19 +6215,25 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
 
     def _parse_card(text: str) -> Optional[str]:
         """
-        Xabardan karta oxirgi 4 raqamini topib, DB dan to'liq raqamni olish.
-        Humo format: HUMOCARD *8906
+        Xabardan karta oxirgi 4 raqamini topib, to'liq kartani qaytaradi.
+        Humo/Uzcаrd formatlar: HUMOCARD *8906, UZCARD *1234, **** 1234, karta 8600 **** 1234.
         """
-        # Oxirgi 4 raqamni topish: "*8906", "* 8906", "**8906"
-        m = re.search(r'\*+\s*(\d{4})\b', text)
-        if not m:
-            return None
-        last4 = m.group(1)
+        candidates = []
 
-        # DB dagi kartalar ichidan oxirgi 4 raqami mos keladiganni topish
-        for card in HUMO_CARDS:
-            if card.replace(' ', '').endswith(last4):
-                return card
+        # Eng ishonchli format: *8906, **8906, **** 8906
+        candidates += re.findall(r'\*+\s*(\d{4})\b', text)
+
+        # Ba'zi xabarlarda yulduzcha bo'lmasligi mumkin, shuning uchun matndagi 4 xonali guruhlarni ham ko'ramiz.
+        candidates += re.findall(r'(?<!\d)(\d{4})(?!\d)', text)
+
+        seen = set()
+        for last4 in candidates:
+            if last4 in seen:
+                continue
+            seen.add(last4)
+            for card in PAYMENT_CARDS:
+                if re.sub(r"\D", "", card).endswith(last4):
+                    return card
         return None
 
 
@@ -6212,19 +6262,15 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             )
         else:
             needed = price - bal
-            mtid = db_create_click_invoice(uid, needed)
-            curl = create_click_url(needed, mtid)
             await bot_client.send_message(
                 chat_id,
                 f"\U0001F4C2 **{q_count} ta savol topildi!**\n\n"
                 f"\U0001F4B0 Xizmat narxi: {blocks} \xd7 1 500 = **{price:,} so'm**\n"
                 f"\U0001F4BC Balansda: {bal:,} so'm\n"
                 f"\u2796 Yetishmaydi: **{needed:,} so'm**\n\n"
-                f"\U0001F4CC Savollar saqlanib qoldi \u2014 to'lovdan keyin davom etadi!",
-                buttons=[
-                    [Button.url(f"💳 CLICK orqali {needed:,} so'm to'lash", curl)],
-                ]
+                f"\U0001F4CC Savollar saqlanib qoldi \u2014 to'lovdan keyin davom etadi!"
             )
+            await _send_humo_payment(uid, needed, chat_id=chat_id)
 
     async def _send_preview(userbot, req: QuizRequest, uid: int, chat_id: int,
                             q_count: int, price: int, bal: int, blocks: int, progress_msg=None):
