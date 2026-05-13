@@ -5760,20 +5760,32 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
             if not card:
                 log.warning(f"Karta aniqlanmadi: {text[:80]}")
                 return
-            log.info(f"To'lov aniqlandi: karta={card}, summa={amount}")
+            card_last4 = re.sub(r"\D", "", str(card))[-4:]
+            log.info(f"To'lov aniqlandi: karta_last4={card_last4}, summa={amount}")
+
+            # Muhim: cardxabarbot ko'pincha faqat ***3173 beradi.
+            # Shuning uchun DBdagi pending to'lovlarni olib, karta oxiri + summa bo'yicha solishtiramiz.
             con = get_db()
-            row = con.execute(
-                """SELECT id, user_id, amount FROM payments
-                   WHERE card_num=? AND status='pending'
+            rows = con.execute(
+                """SELECT id, user_id, amount, card_num FROM payments
+                   WHERE status='pending'
                    AND expires_at > datetime('now')
-                   ORDER BY id DESC LIMIT 1""",
-                (card,)
-            ).fetchone()
+                   ORDER BY id DESC"""
+            ).fetchall()
             con.close()
+
+            row = None
+            for r_pay_id, r_user_id, r_amount, r_card in rows:
+                r_last4 = re.sub(r"\D", "", str(r_card))[-4:]
+                if r_last4 == card_last4 and int(r_amount) <= int(amount):
+                    row = (r_pay_id, r_user_id, r_amount, r_card)
+                    break
+
             if not row:
-                log.warning(f"Mos to'lov topilmadi: karta={card}")
+                log.warning(f"Mos to'lov topilmadi: karta_last4={card_last4}, amount={amount}, pending_count={len(rows)}")
                 return
-            pay_id, user_id, expected_amount = row
+
+            pay_id, user_id, expected_amount, payment_card = row
             if amount < expected_amount:
                 await bot_client.send_message(
                     user_id,
@@ -5785,7 +5797,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                 return
             db_confirm_payment(pay_id)
             db_add_balance(user_id, amount, f"To'lov #{pay_id} tasdiqlandi")
-            release_card(card)
+            release_card(payment_card)
             bal = db_get_balance(user_id)
             tests = bal // AI_PRICE
             prev_state = user_states.get(user_id)
@@ -5862,7 +5874,7 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
                               Button.text("🔙 Bosh menyu", resize=True)]]
                 )
             log.info(f"✅ To'lov tasdiqlandi: user={user_id}, +{amount} so'm")
-        log.info(f"✅ @humocardbot tinglash aktiv: {client}")
+        log.info(f"✅ @humocardbot va @cardxabarbot tinglash aktiv: {client}")
 
     # Mavjud ulangan notify clientni sozlash
     for c in all_clients:
@@ -6243,36 +6255,42 @@ Endi tayyorlangan DOCX, PDF yoki TXT faylni shu yerga yuboring.
 
     def _parse_card(text: str) -> Optional[str]:
         """
-        Xabardan karta oxirgi 4 raqamini topib, PAYMENT_CARDS ichidagi to'liq kartani qaytaradi.
-        Qo'llab-quvvatlaydi:
+        Xabardan karta oxirgi 4 raqamini topadi.
+        Cardxabar/Uzum formatlari:
           ***3173
           **** 3173
-          HUMOCARD *8906
-          UZCARD *3173
+          Karta raqami: 8600 5729 8947 3173
+        Qaytadi: '3173' kabi last4.
         """
         text = text or ""
-        candidates = []
 
-        # Eng ishonchli formatlar: ***3173, **** 3173, *8906
-        candidates += re.findall(r"\*+\s*(\d{4})\b", text)
+        # Eng ishonchli format: ***3173 yoki **** 3173
+        m = re.search(r"\*{2,}\s*(\d{4})\b", text)
+        if m:
+            return m.group(1)
 
-        # 'karta' qatori atrofidagi raqamlar
+        # 'karta/card/карта' bor qatorlarda 4 ta raqam izlaymiz
         for line in text.splitlines():
-            if any(w in line.lower() for w in ["karta", "card", "карта"]):
-                candidates += re.findall(r"(?<!\d)(\d{4})(?!\d)", line)
+            low = line.lower()
+            if any(w in low for w in ["karta", "card", "карта"]):
+                m = re.search(r"(?<!\d)(\d{4})(?!\d)", line)
+                if m:
+                    return m.group(1)
 
-        # Umumiy fallback
-        candidates += re.findall(r"(?<!\d)(\d{4})(?!\d)", text)
+        # To'liq karta raqami kelsa oxirgi 4 raqamni olamiz
+        digits = re.sub(r"\D", "", text)
+        for card in PAYMENT_CARDS:
+            last4 = re.sub(r"\D", "", card)[-4:]
+            if last4 and last4 in text:
+                return last4
 
-        seen = set()
-        for last4 in candidates:
-            if last4 in seen:
-                continue
-            seen.add(last4)
-            for card in PAYMENT_CARDS:
-                if re.sub(r"\D", "", card).endswith(last4):
-                    return card
+        # Umumiy fallback: pending kartalarning last4 raqamini qidiramiz
+        for card in PAYMENT_CARDS:
+            last4 = re.sub(r"\D", "", card)[-4:]
+            if last4 and re.search(rf"(?<!\d){re.escape(last4)}(?!\d)", text):
+                return last4
         return None
+
 
 
     # ============================================================
